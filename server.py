@@ -7,6 +7,7 @@ import requests
 from yt_dlp import YoutubeDL
 from yt_dlp.utils import DownloadError
 import yt_dlp
+
 print("yt-dlp path:", yt_dlp.__file__)
 
 app = Flask(__name__)
@@ -15,6 +16,13 @@ CORS(app)
 OUT_DIR = os.path.abspath('downloads')
 os.makedirs(OUT_DIR, exist_ok=True)
 COOKIES_FILE = os.path.join(os.path.dirname(__file__), 'cookies.txt')
+
+# simple progress hook
+def _progress_hook(d):
+    if d.get('status') == 'downloading':
+        app.logger.info("Downloading: %s - %s", d.get('filename'), d.get('_percent_str'))
+    elif d.get('status') == 'finished':
+        app.logger.info("Finished downloading: %s", d.get('filename'))
 
 # helper: build yt-dlp options
 def build_ydl_opts(outtmpl, cookies_file=None, fmt='bestvideo+bestaudio/best', quiet=False):
@@ -27,17 +35,16 @@ def build_ydl_opts(outtmpl, cookies_file=None, fmt='bestvideo+bestaudio/best', q
         'ignoreerrors': True,
         'retries': 3,
         'fragment_retries': 3,
-        'verbose': True,   # <-- fixed comma here
+        'verbose': True,
         'concurrent_fragment_downloads': 3,
         'http_headers': {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36'
         },
-        'progress_hooks': [_progress_hook]  # borrow from your working script
+        'progress_hooks': [_progress_hook]
     }
     if cookies_file and os.path.isfile(cookies_file):
         opts['cookiefile'] = cookies_file
     return opts
-
 
 # TikTok helper (unchanged)
 def download_tiktok_no_watermark(url, outpath):
@@ -65,7 +72,6 @@ def download_with_yt_dlp(url, outtmpl, cookies_file=None):
         with YoutubeDL(ydl_opts) as ydl:
             ydl.download([url])
     except DownloadError as e:
-        # propagate a clear message to caller
         raise RuntimeError(str(e))
     except Exception as e:
         raise RuntimeError(str(e))
@@ -75,7 +81,6 @@ def find_downloaded_file(uid):
     pattern = os.path.join(OUT_DIR, f'{uid}*')
     matches = sorted(glob.glob(pattern))
     for path in matches:
-        # ignore temporary fragments
         if path.endswith('.part') or path.endswith('.tmp'):
             continue
         return path
@@ -92,36 +97,29 @@ def download():
     filename = f'{uid}.mp4'
     outpath = os.path.join(OUT_DIR, filename)
 
-    # prepare outtmpl for yt-dlp so it writes files with the uid prefix
     temp_outtmpl = os.path.join(OUT_DIR, f'{uid}.%(ext)s')
-
 
     try:
         if 'tiktok.com' in url:
             ok = download_tiktok_no_watermark(url, outpath)
             if not ok:
-                # fallback to yt-dlp
-                # use cookies for instagram/facebook if available
                 cookies = COOKIES_FILE if ('instagram.com' in url or 'facebook.com' in url) and os.path.isfile(COOKIES_FILE) else None
                 download_with_yt_dlp(url, temp_outtmpl, cookies_file=cookies)
         else:
             cookies = COOKIES_FILE if ('instagram.com' in url or 'facebook.com' in url) and os.path.isfile(COOKIES_FILE) else None
             download_with_yt_dlp(url, temp_outtmpl, cookies_file=cookies)
 
-        # find the created file
         found = find_downloaded_file(uid)
         if not found:
             app.logger.error('No downloaded file found for uid %s', uid)
             return jsonify({'error': 'Download finished but output file not found'}), 500
 
-        # move/rename to final name if needed
         if os.path.abspath(found) != os.path.abspath(outpath):
             os.replace(found, outpath)
 
     except RuntimeError as e:
         msg = str(e)
         app.logger.error('Download error: %s', msg)
-        # give a helpful hint for maintainers
         if 'facebook' in msg.lower():
             hint = 'Facebook parsing failed. Try updating yt-dlp or enable cookies.'
             return jsonify({'error': msg, 'hint': hint}), 500
