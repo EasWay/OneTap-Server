@@ -27,16 +27,17 @@ def build_ydl_opts(outtmpl, cookies_file=None, fmt='bestvideo+bestaudio/best', q
         'ignoreerrors': True,
         'retries': 3,
         'fragment_retries': 3,
-        'verbose': True,   # <-- add verbose logs
+        'verbose': True,   # <-- fixed comma here
         'concurrent_fragment_downloads': 3,
-        # set a stable User-Agent
         'http_headers': {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36'
-        }
+        },
+        'progress_hooks': [_progress_hook]  # borrow from your working script
     }
     if cookies_file and os.path.isfile(cookies_file):
         opts['cookiefile'] = cookies_file
     return opts
+
 
 # TikTok helper (unchanged)
 def download_tiktok_no_watermark(url, outpath):
@@ -92,7 +93,8 @@ def download():
     outpath = os.path.join(OUT_DIR, filename)
 
     # prepare outtmpl for yt-dlp so it writes files with the uid prefix
-    temp_outtmpl = os.path.join(OUT_DIR, f'{uid}.temp.%(ext)s')
+    temp_outtmpl = os.path.join(OUT_DIR, f'{uid}.%(ext)s')
+
 
     try:
         if 'tiktok.com' in url:
