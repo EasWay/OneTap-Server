@@ -23,10 +23,11 @@ def build_ydl_opts(outtmpl, cookies_file=None, fmt='bestvideo+bestaudio/best', q
         'format': fmt,
         'merge_output_format': 'mp4',
         'noprogress': quiet,
-        'quiet': quiet,
+        'quiet': False,
         'ignoreerrors': True,
         'retries': 3,
         'fragment_retries': 3,
+        'verbose': True   # <-- add verbose logs
         'concurrent_fragment_downloads': 3,
         # set a stable User-Agent
         'http_headers': {
