@@ -6,6 +6,8 @@ import glob
 import requests
 from yt_dlp import YoutubeDL
 from yt_dlp.utils import DownloadError
+import yt_dlp
+print("yt-dlp path:", yt_dlp.__file__)
 
 app = Flask(__name__)
 CORS(app)
@@ -15,7 +17,7 @@ os.makedirs(OUT_DIR, exist_ok=True)
 COOKIES_FILE = os.path.join(os.path.dirname(__file__), 'cookies.txt')
 
 # helper: build yt-dlp options
-def build_ydl_opts(outtmpl, cookies_file=None, fmt='bestvideo+bestaudio/best', quiet=True):
+def build_ydl_opts(outtmpl, cookies_file=None, fmt='bestvideo+bestaudio/best', quiet=False):
     opts = {
         'outtmpl': outtmpl,
         'format': fmt,
