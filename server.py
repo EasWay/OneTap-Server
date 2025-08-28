@@ -1,142 +1,82 @@
-from flask import Flask, request, jsonify, send_from_directory
-from flask_cors import CORS
 import os
+import tempfile
 import uuid
-import glob
-import requests
-from yt_dlp import YoutubeDL
-from yt_dlp.utils import DownloadError
+from flask import Flask, request, send_file, jsonify
 import yt_dlp
-
-print("yt-dlp path:", yt_dlp.__file__)
+import browser_cookie3
 
 app = Flask(__name__)
-CORS(app)
 
-OUT_DIR = os.path.abspath('downloads')
-os.makedirs(OUT_DIR, exist_ok=True)
-COOKIES_FILE = os.path.join(os.path.dirname(__file__), 'cookies.txt')
+DOWNLOAD_DIR = os.path.join(os.getcwd(), "downloads")
+os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
-# simple progress hook
-def _progress_hook(d):
-    if d.get('status') == 'downloading':
-        app.logger.info("Downloading: %s - %s", d.get('filename'), d.get('_percent_str'))
-    elif d.get('status') == 'finished':
-        app.logger.info("Finished downloading: %s", d.get('filename'))
-
-# helper: build yt-dlp options
-def build_ydl_opts(outtmpl, cookies_file=None, fmt='bestvideo+bestaudio/best', quiet=False):
-    opts = {
-        'outtmpl': outtmpl,
-        'format': fmt,
-        'merge_output_format': 'mp4',
-        'noprogress': quiet,
-        'quiet': False,
-        'ignoreerrors': True,
-        'retries': 3,
-        'fragment_retries': 3,
-        'verbose': True,
-        'concurrent_fragment_downloads': 3,
-        'http_headers': {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36'
-        },
-        'progress_hooks': [_progress_hook]
-    }
-    if cookies_file and os.path.isfile(cookies_file):
-        opts['cookiefile'] = cookies_file
-    return opts
-
-# TikTok helper (unchanged)
-def download_tiktok_no_watermark(url, outpath):
+def get_cookies_file():
     try:
-        api = f'https://www.tikwm.com/api/?url={url}'
-        r = requests.get(api, timeout=15)
-        r.raise_for_status()
-        j = r.json()
-        if 'data' in j and 'play' in j['data']:
-            vurl = j['data']['play']
-            rr = requests.get(vurl, timeout=30)
-            rr.raise_for_status()
-            with open(outpath, 'wb') as f:
-                f.write(rr.content)
-            return True
+        cj = browser_cookie3.load(domain_name="instagram.com")
+        if not cj:
+            return None
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".txt")
+        tmp.close()
+        with open(tmp.name, "w", encoding="utf-8") as f:
+            for cookie in cj:
+                f.write("\t".join([
+                    cookie.domain,
+                    "TRUE" if cookie.domain_specified else "FALSE",
+                    cookie.path,
+                    "TRUE" if cookie.secure else "FALSE",
+                    str(int(cookie.expires)) if cookie.expires else "0",
+                    cookie.name,
+                    cookie.value
+                ]) + "\n")
+        return tmp.name
     except Exception as e:
-        app.logger.debug('TikTok helper error: %s', e)
-        return False
-    return False
+        print(f"[ERROR] Failed to extract cookies: {e}")
+        return None
 
-# generic downloader using yt-dlp
-def download_with_yt_dlp(url, outtmpl, cookies_file=None):
-    ydl_opts = build_ydl_opts(outtmpl, cookies_file=cookies_file)
-    try:
-        with YoutubeDL(ydl_opts) as ydl:
-            ydl.download([url])
-    except DownloadError as e:
-        raise RuntimeError(str(e))
-    except Exception as e:
-        raise RuntimeError(str(e))
-
-# find the downloaded file that matches uid prefix
-def find_downloaded_file(uid):
-    pattern = os.path.join(OUT_DIR, f'{uid}*')
-    matches = sorted(glob.glob(pattern))
-    for path in matches:
-        if path.endswith('.part') or path.endswith('.tmp'):
-            continue
-        return path
-    return None
-
-@app.route('/download', methods=['POST'])
-def download():
-    data = request.get_json(force=True)
-    url = data.get('url')
+@app.route("/download", methods=["POST"])
+def download_video():
+    data = request.get_json()
+    url = data.get("url")
     if not url:
-        return jsonify({'error': 'No URL provided'}), 400
+        return jsonify({"error": "No URL provided"}), 400
 
     uid = str(uuid.uuid4())
-    filename = f'{uid}.mp4'
-    outpath = os.path.join(OUT_DIR, filename)
+    output_template = os.path.join(DOWNLOAD_DIR, f"{uid}.%(ext)s")
 
-    temp_outtmpl = os.path.join(OUT_DIR, f'{uid}.%(ext)s')
+    cookiefile = get_cookies_file()
+
+    ydl_opts = {
+        "outtmpl": output_template,
+        "format": "bestvideo+bestaudio/best",
+        "merge_output_format": "mp4",
+        "retries": 3,
+        "fragment_retries": 3,
+        "quiet": False,
+        "noprogress": True,
+    }
+
+    if cookiefile:
+        ydl_opts["cookiefile"] = cookiefile
 
     try:
-        if 'tiktok.com' in url:
-            ok = download_tiktok_no_watermark(url, outpath)
-            if not ok:
-                cookies = COOKIES_FILE if ('instagram.com' in url or 'facebook.com' in url) and os.path.isfile(COOKIES_FILE) else None
-                download_with_yt_dlp(url, temp_outtmpl, cookies_file=cookies)
-        else:
-            cookies = COOKIES_FILE if ('instagram.com' in url or 'facebook.com' in url) and os.path.isfile(COOKIES_FILE) else None
-            download_with_yt_dlp(url, temp_outtmpl, cookies_file=cookies)
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            if not info:
+                return jsonify({"error": "Download failed"}), 500
 
-        found = find_downloaded_file(uid)
-        if not found:
-            app.logger.error('No downloaded file found for uid %s', uid)
-            return jsonify({'error': 'Download finished but output file not found'}), 500
+            ext = info.get("ext", "mp4")
+            file_path = os.path.join(DOWNLOAD_DIR, f"{uid}.{ext}")
 
-        if os.path.abspath(found) != os.path.abspath(outpath):
-            os.replace(found, outpath)
+        if cookiefile and os.path.exists(cookiefile):
+            os.remove(cookiefile)
 
-    except RuntimeError as e:
-        msg = str(e)
-        app.logger.error('Download error: %s', msg)
-        if 'facebook' in msg.lower():
-            hint = 'Facebook parsing failed. Try updating yt-dlp or enable cookies.'
-            return jsonify({'error': msg, 'hint': hint}), 500
-        if 'login' in msg.lower() or 'cookie' in msg.lower():
-            return jsonify({'error': msg, 'hint': 'Use cookies.txt for authenticated downloads'}), 403
-        return jsonify({'error': msg}), 500
+        if not os.path.exists(file_path):
+            return jsonify({"error": "File not found after download"}), 500
+
+        return send_file(file_path, as_attachment=True)
+
     except Exception as e:
-        app.logger.exception('Unexpected error')
-        return jsonify({'error': str(e)}), 500
+        return jsonify({"error": str(e)}), 500
 
-    download_url = f'{request.host_url.rstrip('/')}/files/{filename}'
-    return jsonify({'filename': filename, 'download_url': download_url})
-
-@app.route('/files/<path:filename>')
-def files(filename):
-    return send_from_directory(OUT_DIR, filename, as_attachment=True)
-
-if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port)
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000, debug=True)
