@@ -27,7 +27,7 @@ def build_ydl_opts(outtmpl, cookies_file=None, fmt='bestvideo+bestaudio/best', q
         'ignoreerrors': True,
         'retries': 3,
         'fragment_retries': 3,
-        'verbose': True   # <-- add verbose logs
+        'verbose': True,   # <-- add verbose logs
         'concurrent_fragment_downloads': 3,
         # set a stable User-Agent
         'http_headers': {
