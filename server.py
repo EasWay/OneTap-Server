@@ -1,6 +1,6 @@
 import os
 import uuid
-from flask import Flask, request, send_file, jsonify
+from flask import Flask, request, jsonify, send_from_directory
 import yt_dlp
 
 app = Flask(__name__)
@@ -41,15 +41,23 @@ def download_video():
                 return jsonify({"error": "Download failed"}), 500
 
             ext = info.get("ext", "mp4")
-            file_path = os.path.join(DOWNLOAD_DIR, f"{uid}.{ext}")
+            filename = f"{uid}.{ext}"
+            file_path = os.path.join(DOWNLOAD_DIR, filename)
 
         if not os.path.exists(file_path):
             return jsonify({"error": "File not found after download"}), 500
 
-        return send_file(file_path, as_attachment=True)
+        # Instead of sending the file directly, return a public URL
+        base_url = request.host_url.rstrip("/")
+        return jsonify({"download_url": f"{base_url}/files/{filename}"})
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+# Serve the downloaded files
+@app.route("/files/<filename>")
+def files(filename):
+    return send_from_directory(DOWNLOAD_DIR, filename, as_attachment=True)
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)
