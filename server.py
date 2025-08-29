@@ -47,8 +47,11 @@ def download_video():
         if not os.path.exists(file_path):
             return jsonify({"error": "File not found after download"}), 500
 
-        # Instead of sending the file directly, return a public URL
+        # Always force HTTPS for returned URLs
         base_url = request.host_url.rstrip("/")
+        if base_url.startswith("http://"):
+            base_url = base_url.replace("http://", "https://", 1)
+
         return jsonify({"download_url": f"{base_url}/files/{filename}"})
 
     except Exception as e:
