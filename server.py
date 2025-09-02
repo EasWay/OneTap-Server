@@ -49,7 +49,11 @@ def download_video():
 
         # Instead of sending the file directly, return a public URL
         base_url = request.host_url.rstrip("/")
-        return jsonify({"download_url": f"{base_url}/files/{filename}"})
+        # Ensure the download_url uses https
+        download_url = f"{base_url}/files/{filename}"
+        if download_url.startswith("http://"):
+            download_url = download_url.replace("http://", "https://", 1)
+        return jsonify({"download_url": download_url})
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
