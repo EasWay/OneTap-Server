@@ -10,6 +10,10 @@ os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
 COOKIES_FILE = os.path.join(os.getcwd(), "cookies.txt")  # Use your exported cookies.txt
 
+@app.route("/")
+def home():
+    return "OneTap Server is running"
+
 @app.route("/download", methods=["POST"])
 def download_video():
     data = request.get_json()
@@ -64,4 +68,5 @@ def files(filename):
     return send_from_directory(DOWNLOAD_DIR, filename, as_attachment=True)
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port, debug=True)
