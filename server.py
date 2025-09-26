@@ -1,149 +1,254 @@
 import os
 import uuid
 import time
-from flask import Flask, request, jsonify, send_from_directory
+import requests
 import yt_dlp
-import sys
+from flask import Flask, request, jsonify, send_from_directory
+from dotenv import load_dotenv
 
-# Import the new cookie management module
-# NOTE: This assumes cookie_manager.py is in the same directory
-from cookie_manager import generate_new_instagram_cookies
+# --- Selenium and WebDriver Imports for Cookie Generation ---
+from selenium import webdriver
+from selenium.webdriver.chrome.service import Service as ChromeService
+from selenium.webdriver.common.by import By
+from selenium.webdriver.chrome.options import Options
+from webdriver_manager.chrome import ChromeDriverManager
+# -----------------------------------------------------------
+
+# Load environment variables from .env file FIRST
+# This is crucial for fixing the "not set" error
+load_dotenv()
 
 app = Flask(__name__)
 
-# --- Configuration ---
 DOWNLOAD_DIR = os.path.join(os.getcwd(), "downloads")
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+
 COOKIES_FILE = os.path.join(os.getcwd(), "cookies.txt")
 
-# Load credentials from environment variables
-IG_USERNAME = os.environ.get("IG_USERNAME")
-IG_PASSWORD = os.environ.get("IG_PASSWORD")
+# --- Environment Configuration ---
+# Use os.getenv() for safe access. If missing, the app will log a warning.
+INSTAGRAM_USERNAME = os.getenv("IG_USERNAME", "placeholder_user")
+INSTAGRAM_PASSWORD = os.getenv("IG_PASSWORD", "placeholder_pass")
+# ---------------------------------
 
-if not IG_USERNAME or not IG_PASSWORD:
-    print("WARNING: IG_USERNAME or IG_PASSWORD environment variables are not set.")
-    print("Video downloads from private sites will likely fail.")
-    # Exit here to prevent unexpected runtime errors if you need the creds to start
-    # sys.exit(1) # Consider exiting in a real server environment
+@app.route("/")
+def home():
+    """Simple check to see if the server is running."""
+    return "OneTap Server is running"
 
-# --- Helper Functions ---
+@app.route("/files/<path:filename>")
+def serve_file(filename):
+    """Serves the downloaded file."""
+    return send_from_directory(DOWNLOAD_DIR, filename)
 
-def attempt_download(url, output_template):
+def generate_new_instagram_cookies():
     """
-    Attempts to download a video using yt-dlp with the current cookies.
-    Returns (filename, error_message)
+    Automates login using Selenium to generate a fresh cookies.txt file.
+    This replaces the external logic and ensures environment variables are checked.
     """
+    if INSTAGRAM_USERNAME == "placeholder_user" or INSTAGRAM_PASSWORD == "placeholder_pass":
+        print("!!! WARNING: IG_USERNAME or IG_PASSWORD environment variables are NOT set. !!!")
+        print("!!! This login attempt will likely fail. Please check your .env file or environment setup. !!!")
     
+    print("\n--- Starting automated login to generate fresh cookies (Self-Healing) ---")
+
+    options = Options()
+    # Run in headless mode (no visible browser window)
+    options.add_argument("--headless")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--disable-gpu")
+    options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.4896.75 Safari/537.36")
+
+    # Suppress console log spam from Chrome/GCM (like DEPRECATED_ENDPOINT)
+    options.add_experimental_option('excludeSwitches', ['enable-logging'])
+
+    try:
+        # Use WebDriver Manager to automatically download the correct ChromeDriver
+        driver = webdriver.Chrome(service=ChromeService(ChromeDriverManager().install()), options=options)
+        
+        driver.get("https://www.instagram.com/accounts/login/")
+        
+        # Wait for the page to load and find the input fields
+        time.sleep(5) 
+
+        # Find and enter username
+        driver.find_element(By.NAME, "username").send_keys(INSTAGRAM_USERNAME)
+        
+        # Find and enter password
+        driver.find_element(By.NAME, "password").send_keys(INSTAGRAM_PASSWORD)
+
+        # Find and click the login button
+        driver.find_element(By.XPATH, "//button[contains(., 'Log in')]").click()
+
+        # Wait for login processing and potential redirects
+        time.sleep(10) 
+
+        # Check if login was successful (e.g., if redirected away from login URL)
+        if "login" not in driver.current_url:
+            print("Login successful. Extracting session cookies...")
+            
+            # Extract cookies and save them in Netscape format for yt-dlp
+            with open(COOKIES_FILE, "w") as f:
+                f.write("# Netscape HTTP Cookie File\n# This is a generated file! Do not edit.\n\n")
+                for cookie in driver.get_cookies():
+                    if cookie.get('domain') and cookie.get('name') and cookie.get('value'):
+                        # yt-dlp requires specific fields. We ensure they exist.
+                        domain = cookie['domain'].replace('www.', '.')
+                        # Netscape format fields:
+                        # domain - flag - path - secure - expiration - name - value
+                        f.write(
+                            f"{domain}\t"
+                            f"{'TRUE' if domain.startswith('.') else 'FALSE'}\t"
+                            f"{cookie.get('path', '/')}\t"
+                            f"{'TRUE' if cookie.get('secure') else 'FALSE'}\t"
+                            f"{cookie.get('expiry', '0')}\t"
+                            f"{cookie['name']}\t"
+                            f"{cookie['value']}\n"
+                        )
+            print(f"Successfully saved fresh cookies to {COOKIES_FILE}")
+        else:
+            # If the URL still contains 'login', the login failed
+            error_message = f"Login failed. Check credentials for user: {INSTAGRAM_USERNAME}. Current URL: {driver.current_url}"
+            print(f"!!! ERROR: {error_message} !!!")
+            # Clear the old, broken cookies file if it exists
+            if os.path.exists(COOKIES_FILE):
+                os.remove(COOKIES_FILE)
+                print(f"Old cookies file removed: {COOKIES_FILE}")
+            raise Exception(error_message)
+
+    except Exception as e:
+        print(f"An error occurred during cookie generation: {e}")
+        # Re-raise the exception to stop the server from starting with bad credentials
+        raise
+    finally:
+        if 'driver' in locals():
+            driver.quit()
+        print("--- Cookie generation finished ---\n")
+
+def run_download(url, cookies_retry=False):
+    """Executes the yt-dlp download with a self-healing cookie check."""
+    uid = str(uuid.uuid4())
+    # Define a simple template path for the unique file name
+    template_name = f"{uid}.%(ext)s"
+    output_template = os.path.join(DOWNLOAD_DIR, template_name)
+
     ydl_opts = {
         "outtmpl": output_template,
         "format": "bestvideo+bestaudio/best",
         "merge_output_format": "mp4",
         "retries": 3,
         "fragment_retries": 3,
-        "quiet": True,  # Suppress excessive output for cleaner logs
+        "quiet": True, # Keep quiet when running the server
         "noprogress": True,
+        "extractor_args": {"instagram": ["--enable-test-suite"]}, # Use test suite for reliability
     }
 
+    # Always use the cookie file if it exists
     if os.path.exists(COOKIES_FILE):
         ydl_opts["cookiefile"] = COOKIES_FILE
-    
+
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            if not info:
-                return None, "Download failed (yt-dlp returned no info)."
-
-            # Get the actual filename after potential merging and file extension resolution
-            # The 'requested_downloads' attribute is a good indicator of the final path
-            final_path = ydl.in_template_path(output_template)
+            print(f"Attempting download for: {url} (Cookie Retry: {cookies_retry})")
             
-            # Since yt-dlp might rename/merge, we need to find the actual file.
-            # A common reliable way is to check the post-processing status
-            if 'filepath' in info:
-                file_path = info['filepath']
-            elif 'requested_downloads' in info and info['requested_downloads']:
-                # Get the path of the first successful download/merge
-                file_path = info['requested_downloads'][0].get('filepath', '')
+            # Use 'download=True' to perform the download
+            info_dict = ydl.extract_info(url, download=True)
+            
+            if not info_dict:
+                raise Exception("yt-dlp returned no information.")
+
+            # --- FIX: Retrieve the actual file path used by yt-dlp ---
+            # yt-dlp stores the final file path(s) in the info dictionary
+            # For a single video download, the final file path is often stored 
+            # under the '_filename' key for the merged file.
+            final_path = info_dict.get('_filename')
+            
+            if not final_path:
+                # Fallback path reconstruction if _filename is missing (e.g., if merge failed)
+                ext = info_dict.get("ext", "mp4")
+                filename = f"{uid}.{ext}"
+                final_path = os.path.join(DOWNLOAD_DIR, filename)
+
+            if not os.path.exists(final_path):
+                # We need to look for files that match the UUID in case yt-dlp did not merge
+                # This ensures we handle cases where the file extension might differ from 'mp4'
+                files_found = [f for f in os.listdir(DOWNLOAD_DIR) if f.startswith(uid) and os.path.isfile(os.path.join(DOWNLOAD_DIR, f))]
+                
+                if files_found:
+                    # Pick the first one found that matches the UUID
+                    filename = files_found[0]
+                    final_path = os.path.join(DOWNLOAD_DIR, filename)
+                else:
+                    raise Exception(f"File not found after download (UUID: {uid}).")
+            
+            # Extract the simple filename from the full path
+            filename = os.path.basename(final_path)
+
+            print(f"Download successful. File: {filename}")
+
+            # Return the public URL
+            base_url = request.host_url.rstrip("/")
+            download_url = f"{base_url}/files/{filename}"
+            if download_url.startswith("http://"):
+                download_url = download_url.replace("http://", "https://", 1)
+            
+            return download_url, None # Return download_url and no error
+
+    except yt_dlp.utils.DownloadError as e:
+        error_message = str(e)
+        # Check for authentication failure indicator
+        if "unable to download" in error_message.lower() or "need to log in" in error_message.lower():
+            if not cookies_retry:
+                print("Download failed due to authentication. Initiating cookie self-healing process...")
+                try:
+                    # Rerun cookie generation
+                    generate_new_instagram_cookies()
+                    # Re-attempt download
+                    return run_download(url, cookies_retry=True) 
+                except Exception as auth_e:
+                    # If cookie generation or retry fails, return the original error
+                    return None, f"Cookie self-healing failed: {auth_e}. Original error: {error_message}"
             else:
-                # Fallback on old method if the above doesn't work, though less reliable
-                ext = info.get("ext", "mp4")
-                file_path = f"{output_template.split('%')[0].strip('.')}.{ext}"
-            
-            # Extract just the filename for the return value
-            filename = os.path.basename(file_path)
-
-        if not os.path.exists(os.path.join(DOWNLOAD_DIR, filename)):
-            return None, f"File not found after download: {filename}. Possible authentication failure."
-
-        return filename, None
-
+                # If it failed on the second attempt, the credentials are bad
+                return None, f"Download failed twice (bad credentials). Error: {error_message}"
+        else:
+            # Handle non-authentication related download errors
+            return None, f"Download Error: {error_message}"
     except Exception as e:
-        error_msg = str(e)
-        # Check if the error suggests a login/auth issue
-        # yt-dlp often reports 'HTTP Error 404' or '403 Forbidden' for auth issues
-        if "403 Forbidden" in error_msg or "404 Not Found" in error_msg or "No such file or directory" in error_msg:
-             return None, f"Auth or Download Failure: {error_msg}"
-        return None, error_msg
-
-# --- Flask Routes ---
-
-@app.route("/")
-def home():
-    return "OneTap Server is running"
+        # Handle general errors
+        return None, f"General Error: {str(e)}"
 
 @app.route("/download", methods=["POST"])
 def download_video():
+    """Endpoint for receiving the video URL and starting the download process."""
     data = request.get_json()
     url = data.get("url")
     if not url:
         return jsonify({"error": "No URL provided"}), 400
 
-    uid = str(uuid.uuid4())
-    output_template = os.path.join(DOWNLOAD_DIR, f"{uid}.%(ext)s")
-    
-    # 1. First download attempt
-    filename, error_msg = attempt_download(url, output_template)
+    download_url, error = run_download(url)
 
-    # 2. Check for authentication/cookie failure
-    if error_msg and ("Auth" in error_msg or "Forbidden" in error_msg):
-        print(f"Download failed with potential auth error: {error_msg}")
-        
-        if IG_USERNAME and IG_PASSWORD:
-            # Attempt to refresh cookies
-            if generate_new_instagram_cookies(IG_USERNAME, IG_PASSWORD):
-                # Retry download after successful cookie refresh
-                print("Cookie refresh successful. Retrying download...")
-                filename, error_msg = attempt_download(url, output_template)
-            else:
-                print("Cookie refresh failed. Aborting retry.")
-        else:
-            print("Cannot refresh cookies: IG_USERNAME or IG_PASSWORD not configured.")
+    if download_url:
+        return jsonify({"download_url": download_url})
+    else:
+        # If run_download returns None and an error message, use the error
+        # The frontend expects a 500 error structure with the message in 'error'
+        return jsonify({"error": error}), 500
 
-    # 3. Final error check
-    if error_msg:
-        # Check if the generated cookie file is now empty, indicating a failed login
-        if os.path.exists(COOKIES_FILE) and os.path.getsize(COOKIES_FILE) < 100:
-             return jsonify({"error": f"Download failed, and automated login also failed. Please check credentials or network: {error_msg}"}), 500
-        return jsonify({"error": f"Download failed after all attempts: {error_msg}"}), 500
-
-    # 4. Success response
-    base_url = request.host_url.rstrip("/")
-    download_url = f"{base_url}/files/{filename}"
-    if download_url.startswith("http://"):
-        download_url = download_url.replace("http://", "https://", 1)
-        
-    return jsonify({"download_url": download_url})
-
-# Serve the downloaded files
-@app.route("/files/<filename>")
-def files(filename):
-    # Security note: send_from_directory handles path traversal security
-    return send_from_directory(DOWNLOAD_DIR, filename, as_attachment=True)
-
+# --- Server Startup Initialization ---
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    # Generate cookies on startup to ensure initial session is valid
-    if IG_USERNAME and IG_PASSWORD:
-        generate_new_instagram_cookies(IG_USERNAME, IG_PASSWORD)
-    
-    app.run(host="0.0.0.0", port=port, debug=True)
+    # Ensure cookies are fresh or generated before the server starts
+    if not os.path.exists(COOKIES_FILE):
+        print(f"No cookies file found at {COOKIES_FILE}. Generating fresh cookies...")
+        try:
+            generate_new_instagram_cookies()
+        except:
+            print("Cookie generation failed on startup. Server will attempt to run, but downloads requiring Instagram login may fail.")
+    else:
+        print("Existing cookies.txt found. Server will start and assume cookies are valid.")
+        print("They will be regenerated automatically if a download fails due to authentication.")
+
+    # You can remove the 'host' and 'port' arguments if you prefer Flask's default settings.
+    # The Debugger PIN is normal for development environments.
+    app.run(host='0.0.0.0', port=5000, debug=True)
