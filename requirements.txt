@@ -3,3 +3,5 @@ flask-cors
 yt-dlp
 requests
 browser-cookie3
+selenium
+webdriver-manager
