@@ -6,6 +6,8 @@ from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.chrome.service import Service
+from webdriver_manager.chrome import ChromeDriverManager
 
 # Define the path where the cookies will be saved (must match server.py)
 COOKIES_FILE = os.path.join(os.getcwd(), "cookies.txt")
@@ -41,7 +43,9 @@ def extend_google_youtube_session():
     chrome_options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
     
     try:
-        driver = webdriver.Chrome(options=chrome_options)
+        # Use webdriver-manager for automatic ChromeDriver management
+        service = Service(ChromeDriverManager().install())
+        driver = webdriver.Chrome(service=service, options=chrome_options)
         driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
     except Exception as e:
         print(f"Error initializing WebDriver: {e}")
@@ -218,13 +222,13 @@ def generate_new_instagram_cookies(username, password):
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
     
-    # Initialize the WebDriver
-    # Assuming the user has the necessary WebDriver executable configured in their PATH
+    # Initialize the WebDriver using webdriver-manager
     try:
-        driver = webdriver.Chrome(options=chrome_options)
+        service = Service(ChromeDriverManager().install())
+        driver = webdriver.Chrome(service=service, options=chrome_options)
     except Exception as e:
         print(f"Error initializing WebDriver: {e}")
-        print("Please ensure your Chrome WebDriver is installed and in your system PATH.")
+        print("Please ensure Chrome is installed and accessible.")
         return False
 
     try:
