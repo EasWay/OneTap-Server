@@ -30,6 +30,17 @@ def extend_google_youtube_session():
         print("Please upload your Google cookies file first.")
         return False
     
+    # Check if file is not empty
+    try:
+        file_size = os.path.getsize(GOOGLE_COOKIES_FILE)
+        if file_size == 0:
+            print(f"Google cookies file is empty: {GOOGLE_COOKIES_FILE}")
+            return False
+        print(f"Found Google cookies file ({file_size} bytes)")
+    except Exception as e:
+        print(f"Error checking cookies file: {e}")
+        return False
+    
     # Setup Chrome options for headless execution
     chrome_options = webdriver.ChromeOptions()
     chrome_options.add_argument("--headless")

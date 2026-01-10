@@ -34,6 +34,8 @@ def youtube_session_scheduler():
     """Background thread that periodically extends YouTube session"""
     global last_youtube_extension
     
+    logger.info("🔄 YouTube session scheduler thread started")
+    
     while True:
         try:
             current_time = datetime.now()
@@ -45,14 +47,17 @@ def youtube_session_scheduler():
                 # Only try if Google cookies file exists
                 if os.path.exists(GOOGLE_COOKIES_FILE):
                     logger.info("🔄 Scheduled YouTube session extension starting...")
-                    from cookie_manager import extend_google_youtube_session
-                    
-                    success = extend_google_youtube_session()
-                    if success:
-                        last_youtube_extension = current_time
-                        logger.info("✅ Scheduled YouTube session extension completed")
-                    else:
-                        logger.warning("⚠️ Scheduled YouTube session extension failed")
+                    try:
+                        from cookie_manager import extend_google_youtube_session
+                        
+                        success = extend_google_youtube_session()
+                        if success:
+                            last_youtube_extension = current_time
+                            logger.info("✅ Scheduled YouTube session extension completed")
+                        else:
+                            logger.warning("⚠️ Scheduled YouTube session extension failed")
+                    except Exception as ext_error:
+                        logger.error(f"❌ Session extension error: {str(ext_error)}")
                 else:
                     logger.info("📝 No Google cookies found, skipping scheduled extension")
             
@@ -100,29 +105,51 @@ def update_google_cookies():
 def extend_youtube_session():
     """Manually trigger YouTube session extension"""
     try:
+        # Check if Google cookies exist first
+        if not os.path.exists(GOOGLE_COOKIES_FILE):
+            return jsonify({
+                "error": "No Google cookies found. Please upload cookies first via /update_google_cookies"
+            }), 400
+        
+        # Import and run the extension
         from cookie_manager import extend_google_youtube_session
+        logger.info("🔄 Manual YouTube session extension triggered")
+        
         success = extend_google_youtube_session()
         if success:
             global last_youtube_extension
             last_youtube_extension = datetime.now()
-            return jsonify({"message": "YouTube session extended successfully"})
+            logger.info("✅ Manual YouTube session extension completed")
+            return jsonify({
+                "message": "YouTube session extended successfully",
+                "timestamp": last_youtube_extension.isoformat()
+            })
         else:
+            logger.warning("⚠️ Manual YouTube session extension failed")
             return jsonify({"error": "Failed to extend YouTube session"}), 500
+            
+    except ImportError as ie:
+        logger.error(f"Import error in session extension: {str(ie)}")
+        return jsonify({"error": f"Module import failed: {str(ie)}"}), 500
     except Exception as e:
         logger.error(f"YouTube session extension failed: {str(e)}")
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": f"Extension failed: {str(e)}"}), 500
 
 @app.route("/youtube_session_status", methods=["GET"])
 def youtube_session_status():
     """Check YouTube session extension status"""
     try:
         google_cookies_exists = os.path.exists(GOOGLE_COOKIES_FILE)
+        google_cookies_size = os.path.getsize(GOOGLE_COOKIES_FILE) if google_cookies_exists else 0
         
         status = {
             "google_cookies_uploaded": google_cookies_exists,
+            "google_cookies_size_bytes": google_cookies_size,
             "last_extension": last_youtube_extension.isoformat() if last_youtube_extension else None,
             "next_scheduled_extension": None,
-            "extension_interval_hours": YOUTUBE_SESSION_INTERVAL_HOURS
+            "extension_interval_hours": YOUTUBE_SESSION_INTERVAL_HOURS,
+            "scheduler_running": True,  # Since we're responding, scheduler thread is alive
+            "current_time": datetime.now().isoformat()
         }
         
         if last_youtube_extension:
@@ -131,6 +158,30 @@ def youtube_session_status():
             status["minutes_until_next"] = int((next_extension - datetime.now()).total_seconds() / 60)
         
         return jsonify(status)
+    except Exception as e:
+        logger.error(f"Status check failed: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/debug_files", methods=["GET"])
+def debug_files():
+    """Debug endpoint to check file system state"""
+    try:
+        files_info = {
+            "working_directory": os.getcwd(),
+            "instagram_cookies": {
+                "exists": os.path.exists(COOKIES_FILE),
+                "size": os.path.getsize(COOKIES_FILE) if os.path.exists(COOKIES_FILE) else 0
+            },
+            "google_cookies": {
+                "exists": os.path.exists(GOOGLE_COOKIES_FILE),
+                "size": os.path.getsize(GOOGLE_COOKIES_FILE) if os.path.exists(GOOGLE_COOKIES_FILE) else 0
+            },
+            "downloads_dir": {
+                "exists": os.path.exists(DOWNLOAD_DIR),
+                "files_count": len(os.listdir(DOWNLOAD_DIR)) if os.path.exists(DOWNLOAD_DIR) else 0
+            }
+        }
+        return jsonify(files_info)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -222,4 +273,22 @@ def check_version():
     })
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=True, threaded=True)
+    # For cloud platforms (Render, Heroku), use assigned PORT
+    # For local development, allow fallback to any available port
+    if "PORT" in os.environ:
+        # Cloud deployment - must use assigned port
+        port = int(os.environ.get("PORT"))
+        app.run(host="0.0.0.0", port=port, debug=False, threaded=True)
+    else:
+        # Local development - can use any available port
+        import socket
+        def find_free_port():
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.bind(('', 0))
+                s.listen(1)
+                port = s.getsockname()[1]
+            return port
+        
+        port = find_free_port()
+        print(f"🚀 Local development server starting on port {port}")
+        app.run(host="0.0.0.0", port=port, debug=True, threaded=True)
