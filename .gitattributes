@@ -1,0 +1,5 @@
+tldv_profile/**/*.db filter=lfs diff=lfs merge=lfs -text
+tldv_profile/**/History filter=lfs diff=lfs merge=lfs -text
+tldv_profile/**/Cookies filter=lfs diff=lfs merge=lfs -text
+tldv_profile/**/Web[[:space:]]Data filter=lfs diff=lfs merge=lfs -text
+tldv_profile/**/Login[[:space:]]Data filter=lfs diff=lfs merge=lfs -text

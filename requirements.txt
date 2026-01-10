@@ -1,0 +1,10 @@
+flask
+flask-cors
+yt-dlp @ git+https://github.com/yt-dlp/yt-dlp.git@master
+requests
+browser-cookie3
+selenium
+webdriver-manager
+curl_cffi
+PyGithub
+ffmpeg-python
