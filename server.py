@@ -1,6 +1,9 @@
 import os
 import uuid
 import logging
+import threading
+import time
+from datetime import datetime, timedelta
 from flask import Flask, request, jsonify, send_from_directory
 import yt_dlp
 
@@ -18,9 +21,52 @@ app = Flask(__name__)
 DOWNLOAD_DIR = os.path.join(os.getcwd(), "downloads")
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 COOKIES_FILE = os.path.join(os.getcwd(), "cookies.txt")
+GOOGLE_COOKIES_FILE = os.path.join(os.getcwd(), "google_cookies.txt")
+
+# YouTube session extension settings
+YOUTUBE_SESSION_INTERVAL_HOURS = 6  # Extend session every 6 hours
+last_youtube_extension = None
 
 # --- VERIFY yt-dlp VERSION ---
 logger.info(f"🦖 yt-dlp Version: {yt_dlp.version.__version__}")
+
+def youtube_session_scheduler():
+    """Background thread that periodically extends YouTube session"""
+    global last_youtube_extension
+    
+    while True:
+        try:
+            current_time = datetime.now()
+            
+            # Check if we need to extend the session
+            if (last_youtube_extension is None or 
+                current_time - last_youtube_extension >= timedelta(hours=YOUTUBE_SESSION_INTERVAL_HOURS)):
+                
+                # Only try if Google cookies file exists
+                if os.path.exists(GOOGLE_COOKIES_FILE):
+                    logger.info("🔄 Scheduled YouTube session extension starting...")
+                    from cookie_manager import extend_google_youtube_session
+                    
+                    success = extend_google_youtube_session()
+                    if success:
+                        last_youtube_extension = current_time
+                        logger.info("✅ Scheduled YouTube session extension completed")
+                    else:
+                        logger.warning("⚠️ Scheduled YouTube session extension failed")
+                else:
+                    logger.info("📝 No Google cookies found, skipping scheduled extension")
+            
+            # Sleep for 30 minutes before checking again
+            time.sleep(1800)  # 30 minutes
+            
+        except Exception as e:
+            logger.error(f"❌ YouTube session scheduler error: {str(e)}")
+            time.sleep(3600)  # Wait 1 hour on error
+
+# Start the background scheduler
+scheduler_thread = threading.Thread(target=youtube_session_scheduler, daemon=True)
+scheduler_thread.start()
+logger.info(f"🕒 YouTube session scheduler started (interval: {YOUTUBE_SESSION_INTERVAL_HOURS}h)")
 
 @app.route("/")
 def home():
@@ -34,6 +80,57 @@ def update_cookies():
         file = request.files['file']
         file.save(COOKIES_FILE)
         return jsonify({"message": "Cookies updated", "size": os.path.getsize(COOKIES_FILE)})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/update_google_cookies", methods=["POST"])
+def update_google_cookies():
+    """Upload Google cookies for YouTube session extension"""
+    try:
+        if 'file' not in request.files: 
+            return jsonify({"error": "No file"}), 400
+        file = request.files['file']
+        google_cookies_file = os.path.join(os.getcwd(), "google_cookies.txt")
+        file.save(google_cookies_file)
+        return jsonify({"message": "Google cookies updated", "size": os.path.getsize(google_cookies_file)})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/extend_youtube_session", methods=["POST"])
+def extend_youtube_session():
+    """Manually trigger YouTube session extension"""
+    try:
+        from cookie_manager import extend_google_youtube_session
+        success = extend_google_youtube_session()
+        if success:
+            global last_youtube_extension
+            last_youtube_extension = datetime.now()
+            return jsonify({"message": "YouTube session extended successfully"})
+        else:
+            return jsonify({"error": "Failed to extend YouTube session"}), 500
+    except Exception as e:
+        logger.error(f"YouTube session extension failed: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/youtube_session_status", methods=["GET"])
+def youtube_session_status():
+    """Check YouTube session extension status"""
+    try:
+        google_cookies_exists = os.path.exists(GOOGLE_COOKIES_FILE)
+        
+        status = {
+            "google_cookies_uploaded": google_cookies_exists,
+            "last_extension": last_youtube_extension.isoformat() if last_youtube_extension else None,
+            "next_scheduled_extension": None,
+            "extension_interval_hours": YOUTUBE_SESSION_INTERVAL_HOURS
+        }
+        
+        if last_youtube_extension:
+            next_extension = last_youtube_extension + timedelta(hours=YOUTUBE_SESSION_INTERVAL_HOURS)
+            status["next_scheduled_extension"] = next_extension.isoformat()
+            status["minutes_until_next"] = int((next_extension - datetime.now()).total_seconds() / 60)
+        
+        return jsonify(status)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -64,9 +161,20 @@ def download_video():
 
         # --- Determine platform-specific strategy ---
         if "youtube.com" in url or "youtu.be" in url:
-            logger.info("📺 YouTube URL: Using 'android_tv' client")
-            ydl_opts["extractor_args"] = {"youtube": {"player_client": ["android_tv"]}}
-            ydl_opts.pop("cookiefile", None)
+            logger.info("📺 YouTube URL detected")
+            
+            # Try Google cookies first (for signed-in experience)
+            if os.path.exists(GOOGLE_COOKIES_FILE):
+                logger.info("🍪 Using Google cookies for YouTube")
+                ydl_opts["cookiefile"] = GOOGLE_COOKIES_FILE
+                ydl_opts["user_agent"] = (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                )
+            else:
+                logger.info("📱 Using android_tv client for YouTube (no cookies)")
+                ydl_opts["extractor_args"] = {"youtube": {"player_client": ["android_tv"]}}
+                ydl_opts.pop("cookiefile", None)
         else:
             logger.info("🍪 Social Media: Using Cookies + UA")
             ydl_opts["user_agent"] = (
