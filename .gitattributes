@@ -1,41 +1,17 @@
 # Git LFS configuration for OneTap Server
 # Large files that should be stored in LFS
 
-# Chrome profile databases and large files
-tldv_profile/**/*.db filter=lfs diff=lfs merge=lfs -text
-tldv_profile/**/*.sqlite filter=lfs diff=lfs merge=lfs -text
-tldv_profile/**/*.sqlite-journal filter=lfs diff=lfs merge=lfs -text
-tldv_profile/**/*.log filter=lfs diff=lfs merge=lfs -text
-
-# Chrome profile cache and data directories
-tldv_profile/**/Cache/** filter=lfs diff=lfs merge=lfs -text
-tldv_profile/**/Code?Cache/** filter=lfs diff=lfs merge=lfs -text
-tldv_profile/**/GPUCache/** filter=lfs diff=lfs merge=lfs -text
-tldv_profile/**/Service?Worker/** filter=lfs diff=lfs merge=lfs -text
-tldv_profile/**/IndexedDB/** filter=lfs diff=lfs merge=lfs -text
-tldv_profile/**/Local?Storage/** filter=lfs diff=lfs merge=lfs -text
-tldv_profile/**/Session?Storage/** filter=lfs diff=lfs merge=lfs -text
-tldv_profile/**/WebStorage/** filter=lfs diff=lfs merge=lfs -text
-tldv_profile/**/blob_storage/** filter=lfs diff=lfs merge=lfs -text
-
-# Chrome profile specific large files
-tldv_profile/**/History filter=lfs diff=lfs merge=lfs -text
-tldv_profile/**/History-journal filter=lfs diff=lfs merge=lfs -text
-tldv_profile/**/Favicons filter=lfs diff=lfs merge=lfs -text
-tldv_profile/**/Favicons-journal filter=lfs diff=lfs merge=lfs -text
-tldv_profile/**/Top?Sites filter=lfs diff=lfs merge=lfs -text
-tldv_profile/**/Top?Sites-journal filter=lfs diff=lfs merge=lfs -text
-tldv_profile/**/Web?Data filter=lfs diff=lfs merge=lfs -text
-tldv_profile/**/Web?Data-journal filter=lfs diff=lfs merge=lfs -text
-tldv_profile/**/Login?Data filter=lfs diff=lfs merge=lfs -text
-tldv_profile/**/Login?Data-journal filter=lfs diff=lfs merge=lfs -text
-tldv_profile/**/Cookies filter=lfs diff=lfs merge=lfs -text
-tldv_profile/**/Cookies-journal filter=lfs diff=lfs merge=lfs -text
-
-# Any backup profiles
-youtube_profile/** filter=lfs diff=lfs merge=lfs -text
-
-# Other large files
+# Database files
 *.db filter=lfs diff=lfs merge=lfs -text
 *.sqlite filter=lfs diff=lfs merge=lfs -text
 *.sqlite3 filter=lfs diff=lfs merge=lfs -text
+
+# Binary files that might be large
+*.bin filter=lfs diff=lfs merge=lfs -text
+*.dat filter=lfs diff=lfs merge=lfs -text
+
+# Media files (if any)
+*.mp4 filter=lfs diff=lfs merge=lfs -text
+*.avi filter=lfs diff=lfs merge=lfs -text
+*.mov filter=lfs diff=lfs merge=lfs -text
+*.mkv filter=lfs diff=lfs merge=lfs -text

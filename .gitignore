@@ -39,13 +39,9 @@ Thumbs.db
 # Project specific
 downloads/
 temp_cookies.db
-chrome_version.json
-last_ua.txt
-youtube_profile/
 
 # Logs
 *.log
-chrome_debug.log
 
 # Temporary files
 *.tmp
