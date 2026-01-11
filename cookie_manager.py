@@ -15,15 +15,41 @@ GOOGLE_COOKIES_FILE = os.path.join(os.getcwd(), "google_cookies.txt")
 
 def extend_google_youtube_session():
     """
-    Extends an existing Google/YouTube session by loading uploaded cookies,
-    refreshing the session, and saving updated tokens. This approach avoids
-    the need to log in from scratch on headless servers.
+    Extends an existing Google/YouTube session using Chrome profile approach first,
+    then falls back to cookie-based approach if needed.
     
     Returns:
         bool: True if session was successfully extended, False otherwise.
     """
     print("--- 🚀 Starting YouTube session extension ---")
     
+    # Try Chrome profile approach first if tldv_profile exists
+    if os.path.exists("tldv_profile"):
+        try:
+            from chrome_profile_manager import ChromeProfileManager
+            
+            print("🔄 Attempting YouTube session extension using Chrome profile...")
+            manager = ChromeProfileManager()
+            
+            if manager.extend_youtube_session():
+                print("✅ YouTube session extended successfully using Chrome profile!")
+                return True
+            else:
+                print("⚠️ Chrome profile approach failed, falling back to cookie-based method...")
+        
+        except ImportError:
+            print("⚠️ Chrome profile manager not available, using cookie-based approach...")
+        except Exception as e:
+            print(f"⚠️ Chrome profile approach failed: {str(e)}, falling back to cookie-based method...")
+    else:
+        print("📁 No tldv_profile found, using cookie-based approach...")
+    
+    # Fallback to original cookie-based approach
+    return extend_google_youtube_session_cookies()
+def extend_google_youtube_session_cookies():
+    """
+    Original cookie-based YouTube session extension method
+    """
     # Check if existing Google cookies file exists
     if not os.path.exists(GOOGLE_COOKIES_FILE):
         print(f"❌ No Google cookies found at {GOOGLE_COOKIES_FILE}")
