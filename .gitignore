@@ -43,16 +43,6 @@ chrome_version.json
 last_ua.txt
 youtube_profile/
 
-# Large profile data (keep original but ignore backups)
-tldv_profile/Default/Cache/
-tldv_profile/Default/Code Cache/
-tldv_profile/Default/GPUCache/
-tldv_profile/Default/Service Worker/
-tldv_profile/Default/IndexedDB/
-tldv_profile/Default/Local Storage/
-tldv_profile/Default/Session Storage/
-tldv_profile/Default/WebStorage/
-
 # Logs
 *.log
 chrome_debug.log
