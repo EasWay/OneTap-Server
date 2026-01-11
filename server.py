@@ -279,6 +279,80 @@ class OneTapDownloader:
                 "cookies_used": False,
                 "method": "basic_fallback"
             }
+
+    def extract_video_info(self, url):
+        """Extract video information using Selenium"""
+        try:
+            logger.info(f"🔍 Extracting video info from: {url}")
+            
+            # Load cookies if not already loaded
+            if not self.cookies_loaded:
+                self.load_authenticated_cookies()
+            
+            # Navigate to the video
+            self.driver.get(url)
+            time.sleep(5)
+            
+            # Wait for page to load
+            try:
+                WebDriverWait(self.driver, 15).until(
+                    lambda driver: driver.execute_script("return document.readyState") == "complete"
+                )
+            except TimeoutException:
+                logger.warning("⚠️ Page load timeout, continuing...")
+            
+            # Extract video title
+            title = "Unknown"
+            title_selectors = [
+                "h1.ytd-video-primary-info-renderer",
+                "h1 yt-formatted-string",
+                "h1.style-scope.ytd-video-primary-info-renderer",
+                "meta[property='og:title']"
+            ]
+            
+            for selector in title_selectors:
+                try:
+                    if selector.startswith("meta"):
+                        element = self.driver.find_element(By.CSS_SELECTOR, selector)
+                        title = element.get_attribute("content")
+                    else:
+                        element = self.driver.find_element(By.CSS_SELECTOR, selector)
+                        title = element.text.strip()
+                    
+                    if title and title != "Unknown":
+                        logger.info(f"📺 Video title: {title}")
+                        break
+                except NoSuchElementException:
+                    continue
+            
+            # Extract video duration from page source or meta tags
+            duration = 0
+            try:
+                # Try to get duration from meta tag
+                duration_element = self.driver.find_element(By.CSS_SELECTOR, "meta[itemprop='duration']")
+                duration_content = duration_element.get_attribute("content")
+                if duration_content:
+                    # Parse ISO 8601 duration (PT1M30S -> 90 seconds)
+                    duration = self.parse_duration(duration_content)
+                    logger.info(f"⏱️ Video duration: {duration}s")
+            except NoSuchElementException:
+                logger.warning("⚠️ Could not extract video duration")
+            
+            # Get video ID from URL
+            video_id = self.extract_video_id(url)
+            
+            return {
+                "title": title,
+                "duration": duration,
+                "video_id": video_id,
+                "original_url": url,
+                "cookies_used": self.cookies_loaded,
+                "method": "selenium"
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ Error extracting video info: {str(e)}")
+            return None
         """Extract video information using Selenium"""
         try:
             logger.info(f"🔍 Extracting video info from: {url}")
