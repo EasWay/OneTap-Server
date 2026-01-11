@@ -185,6 +185,70 @@ def debug_files():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+@app.route("/validate_cookies", methods=["GET"])
+def validate_cookies_endpoint():
+    """Validate the uploaded Google cookies file"""
+    try:
+        if not os.path.exists(GOOGLE_COOKIES_FILE):
+            return jsonify({"error": "No Google cookies file found"}), 404
+        
+        # Basic validation
+        file_size = os.path.getsize(GOOGLE_COOKIES_FILE)
+        
+        with open(GOOGLE_COOKIES_FILE, 'r') as f:
+            lines = f.readlines()
+        
+        cookie_count = 0
+        google_domains = set()
+        host_cookies = []
+        secure_cookies = []
+        auth_cookies = []
+        
+        important_auth_cookies = ['SAPISID', 'HSID', 'SSID', 'APISID', 'SID']
+        
+        for line in lines:
+            line = line.strip()
+            if line.startswith('#') or not line:
+                continue
+            
+            parts = line.split('\t')
+            if len(parts) >= 7:
+                cookie_count += 1
+                domain = parts[0].lstrip('.')
+                name = parts[5]
+                
+                # Check for Google domains
+                google_domain_list = ['google.com', 'youtube.com', 'googlevideo.com', 'gstatic.com', 'googleapis.com']
+                if any(gd in domain for gd in google_domain_list):
+                    google_domains.add(domain)
+                
+                # Categorize cookies
+                if name.startswith('__Host-'):
+                    host_cookies.append(name)
+                elif name.startswith('__Secure-'):
+                    secure_cookies.append(name)
+                
+                if name in important_auth_cookies:
+                    auth_cookies.append(name)
+        
+        validation_result = {
+            "file_size_bytes": file_size,
+            "total_lines": len(lines),
+            "cookie_count": cookie_count,
+            "google_domains": list(google_domains),
+            "auth_cookies_found": auth_cookies,
+            "auth_cookies_missing": [c for c in important_auth_cookies if c not in auth_cookies],
+            "host_cookies_count": len(host_cookies),
+            "secure_cookies_count": len(secure_cookies),
+            "validation_status": "good" if len(auth_cookies) >= 3 else "warning"
+        }
+        
+        return jsonify(validation_result)
+        
+    except Exception as e:
+        logger.error(f"Cookie validation failed: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
 @app.route("/download", methods=["POST"])
 def download_video():
     logger.info("🚀 Download request received")

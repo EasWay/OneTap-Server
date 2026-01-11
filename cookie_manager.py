@@ -81,21 +81,39 @@ def extend_google_youtube_session():
         # Navigate to YouTube to verify session
         print("Verifying session on YouTube...")
         driver.get("https://www.youtube.com")
-        time.sleep(3)
+        time.sleep(5)  # Give more time for page load
         
-        # Check if we're signed in by looking for user avatar or sign-in button
+        # Check if we're signed in by looking for multiple indicators
+        signed_in = False
         try:
-            # Look for user avatar (indicates signed in)
+            # Method 1: Look for user avatar
             avatar = driver.find_element(By.CSS_SELECTOR, "button[aria-label*='Account menu']")
-            print("Successfully detected signed-in session!")
+            print("✅ Successfully detected signed-in session (avatar found)!")
+            signed_in = True
         except:
             try:
-                # Look for sign-in button (indicates not signed in)
-                sign_in = driver.find_element(By.XPATH, "//a[contains(@aria-label, 'Sign in')]")
-                print("Session appears to be expired - sign-in button detected")
-                return False
+                # Method 2: Look for user profile button
+                profile = driver.find_element(By.CSS_SELECTOR, "button[aria-label*='profile']")
+                print("✅ Successfully detected signed-in session (profile found)!")
+                signed_in = True
             except:
-                print("Unable to determine sign-in status, proceeding with cookie extraction...")
+                try:
+                    # Method 3: Check for "Sign in" text (indicates NOT signed in)
+                    page_text = driver.page_source.lower()
+                    if "sign in" in page_text and "sign out" not in page_text:
+                        print("❌ Session appears to be expired - 'Sign in' text detected")
+                        return False
+                    else:
+                        print("🤔 Unable to determine sign-in status clearly, proceeding...")
+                        signed_in = True
+                except Exception as check_error:
+                    print(f"⚠️ Error checking sign-in status: {check_error}")
+                    print("Proceeding with session refresh anyway...")
+                    signed_in = True
+        
+        if not signed_in:
+            print("❌ Could not verify signed-in session")
+            return False
         
         # Navigate to different Google services to refresh tokens
         refresh_urls = [
@@ -175,10 +193,18 @@ def load_cookies_from_file(driver, cookies_file):
                     cookie_dict = {
                         'name': name,
                         'value': value,
-                        'domain': domain if domain.startswith('.') else f'.{domain}',
                         'path': path,
                         'secure': secure
                     }
+                    
+                    # Handle domain normalization and __Host- prefix rules
+                    if name.startswith('__Host-'):
+                        # __Host- cookies must NOT have domain attribute
+                        pass  # Don't set domain for __Host- cookies
+                    else:
+                        # Regular cookies get normalized domain
+                        normalized_domain = domain if domain.startswith('.') else f'.{domain}'
+                        cookie_dict['domain'] = normalized_domain
                     
                     if expiry and expiry > 0:
                         cookie_dict['expiry'] = expiry
@@ -196,9 +222,9 @@ def load_cookies_from_file(driver, cookies_file):
             try:
                 # Navigate to the domain first
                 if 'google' in base_domain:
-                    target_url = "https://www.google.com"
+                    target_url = "https://google.com"  # Use apex domain for better compatibility
                 elif 'youtube' in base_domain:
-                    target_url = "https://www.youtube.com"
+                    target_url = "https://youtube.com"  # Use apex domain
                 else:
                     target_url = f"https://{base_domain}"
                 
@@ -213,14 +239,21 @@ def load_cookies_from_file(driver, cookies_file):
                         # Clean cookie object - remove any extra fields Selenium doesn't like
                         clean_cookie = {
                             'name': cookie['name'],
-                            'value': cookie['value'],
-                            'domain': cookie['domain'],
+                            'value': str(cookie['value']),  # Ensure string type
                             'path': cookie['path'],
                             'secure': cookie['secure']
                         }
                         
-                        # Only add expiry if it's valid
-                        if 'expiry' in cookie and cookie['expiry']:
+                        # Handle __Host- prefix cookies (must NOT have domain attribute)
+                        if cookie['name'].startswith('__Host-'):
+                            print(f"Handling __Host- cookie: {cookie['name']} (no domain)")
+                            # __Host- cookies must not have domain attribute
+                        else:
+                            # Regular cookies can have domain
+                            clean_cookie['domain'] = cookie['domain']
+                        
+                        # Only add expiry if it's valid and positive
+                        if 'expiry' in cookie and cookie['expiry'] and cookie['expiry'] > 0:
                             clean_cookie['expiry'] = cookie['expiry']
                         
                         driver.add_cookie(clean_cookie)

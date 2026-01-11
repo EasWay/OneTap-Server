@@ -81,11 +81,34 @@ def validate_cookie_file(file_path):
         
         print(f"\n🍪 Important cookie names found:")
         important_cookies = ['SAPISID', 'HSID', 'SSID', 'APISID', 'SID', '__Secure-3PAPISID', '__Secure-3PSID', 'sessionid']
+        host_cookies = []
+        secure_cookies = []
+        
+        for cookie_name in cookie_names:
+            if cookie_name.startswith('__Host-'):
+                host_cookies.append(cookie_name)
+            elif cookie_name.startswith('__Secure-'):
+                secure_cookies.append(cookie_name)
+        
         for cookie_name in important_cookies:
             if cookie_name in cookie_names:
                 print(f"   ✅ {cookie_name}")
             else:
                 print(f"   ❌ {cookie_name} (missing)")
+        
+        if host_cookies:
+            print(f"\n🔒 __Host- cookies found ({len(host_cookies)}):")
+            for cookie in host_cookies[:5]:  # Show first 5
+                print(f"   🔐 {cookie}")
+            if len(host_cookies) > 5:
+                print(f"   ... and {len(host_cookies) - 5} more")
+        
+        if secure_cookies:
+            print(f"\n🛡️ __Secure- cookies found ({len(secure_cookies)}):")
+            for cookie in secure_cookies[:5]:  # Show first 5
+                print(f"   🔒 {cookie}")
+            if len(secure_cookies) > 5:
+                print(f"   ... and {len(secure_cookies) - 5} more")
         
         # Check for Google authentication cookies
         google_auth_cookies = ['SAPISID', 'HSID', 'SSID', 'APISID', 'SID']
