@@ -31,13 +31,6 @@ last_youtube_extension = None
 # --- VERIFY yt-dlp VERSION AND JAVASCRIPT RUNTIME ---
 logger.info(f"🦖 yt-dlp Version: {yt_dlp.version.__version__}")
 
-# Install Deno if not available (for Render deployment)
-try:
-    import install_deno
-    install_deno.install_deno()
-except Exception as e:
-    logger.warning(f"Could not run Deno installer: {e}")
-
 # Verify Deno is available for JavaScript challenge solving
 import subprocess
 try:
@@ -47,7 +40,6 @@ try:
         logger.info(f"✅ Deno JavaScript runtime available: {deno_version}")
     else:
         logger.error("❌ Deno not found - YouTube signature solving will fail")
-        logger.error("Try installing Deno manually or check PATH configuration")
 except Exception as e:
     logger.error(f"❌ Deno check failed: {e}")
     logger.error(f"Current PATH: {os.environ.get('PATH', 'Not set')}")
@@ -62,13 +54,6 @@ for deno_path in [render_deno_path, home_deno_path]:
     if deno_path not in current_path:
         os.environ['PATH'] = f"{deno_path}:{current_path}"
         logger.info(f"🔧 Added Deno path: {deno_path}")
-
-# Also check for Node.js as backup on Render
-node_paths = ["/opt/render/project/.heroku/node/bin", "/usr/bin"]
-for node_path in node_paths:
-    if os.path.exists(node_path) and node_path not in current_path:
-        os.environ['PATH'] = f"{node_path}:{os.environ.get('PATH', '')}"
-        logger.info(f"🔧 Added Node.js path: {node_path}")
 
 def youtube_session_scheduler():
     """Background thread that periodically extends YouTube session"""
@@ -388,13 +373,15 @@ def download_video():
         # --- yt-dlp base options ---
         ydl_opts = {
             "outtmpl": output_template,
-            "format": "bestvideo[vcodec^=avc1][height<=1080]+bestaudio[ext=m4a]/best[vcodec^=avc1][height<=1080]/bestvideo[ext=mp4][height<=1080]+bestaudio[ext=m4a]/best[ext=mp4][height<=1080]/best",
+            "format": "bestvideo[vcodec^=avc1][height<=1080]+bestaudio[ext=m4a]/bestvideo[ext=mp4][height<=1080]+bestaudio[ext=m4a]/best[vcodec^=avc1]/best[ext=mp4]/best",
             "noplaylist": True,
             "retries": 5,
             "fragment_retries": 5,
             "quiet": False,
             "noprogress": True,
             "merge_output_format": "mp4",
+            # Enable remote component downloads for JavaScript challenge solving
+            "remote_components": ["ejs:github"],
             # Force Deno usage for JavaScript challenge solving
             "extractor_args": {
                 "youtube": {
@@ -403,9 +390,8 @@ def download_video():
                     "js_engine": "deno"
                 }
             },
-            # Ensure Deno is found in PATH
-            "exec_before_dl_archive": [],
-            "verbose": True  # Enable verbose logging to see Deno usage
+            # Enable verbose logging to see what's happening
+            "verbose": True
         }
 
         # --- Determine platform-specific strategy ---
@@ -415,10 +401,24 @@ def download_video():
             # Try Google cookies first (for signed-in experience)
             if os.path.exists(GOOGLE_COOKIES_FILE):
                 logger.info("🍪 Using Google cookies for YouTube")
+                
+                # Check if chrome_version.json exists - if not, extend session first
+                chrome_version_file = os.path.join(os.getcwd(), "chrome_version.json")
+                if not os.path.exists(chrome_version_file):
+                    logger.info("🔄 Chrome version file missing - extending session first...")
+                    try:
+                        from cookie_manager import extend_google_youtube_session
+                        success = extend_google_youtube_session()
+                        if not success:
+                            logger.error("❌ Session extension failed")
+                            return jsonify({"error": "Session extension failed. Please try /extend_youtube_session first."}), 400
+                    except Exception as e:
+                        logger.error(f"❌ Session extension error: {e}")
+                        return jsonify({"error": f"Session extension failed: {str(e)}"}), 400
+                
                 ydl_opts["cookiefile"] = GOOGLE_COOKIES_FILE
                 
                 # Use the EXACT same User-Agent as Selenium to avoid cookie rejection
-                chrome_version_file = os.path.join(os.getcwd(), "chrome_version.json")
                 if os.path.exists(chrome_version_file):
                     with open(chrome_version_file, 'r') as f:
                         version_info = json.load(f)
