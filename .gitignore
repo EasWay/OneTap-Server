@@ -46,3 +46,22 @@ temp_cookies.db
 # Temporary files
 *.tmp
 *.temp
+
+# Chrome profiles and authentication data (contains OAuth tokens)
+authenticated_youtube_session/
+authenticated_youtube_session_complete_backup/
+youtube_profile/
+youtube_profile_backup/
+tldv_profile/
+google_cookies.txt
+cookies.txt
+*.db
+*.db-journal
+
+# Sensitive deployment files (keep these local only)
+deploy_to_render.py
+render_selenium_server.py
+robust_profile_manager.py
+run_local.py
+test_complete_system.py
+upload_profile_to_render.py

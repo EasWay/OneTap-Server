@@ -4,3 +4,6 @@ yt-dlp @ git+https://github.com/yt-dlp/yt-dlp.git@master
 requests
 curl_cffi
 ffmpeg-python
+cryptography
+selenium
+webdriver-manager
