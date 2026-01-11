@@ -41,38 +41,60 @@ def extend_google_youtube_session():
         print(f"Error checking cookies file: {e}")
         return False
     
-    # Setup Chrome options for headless execution
+    # Setup Chrome options for minimal memory usage on constrained servers
     chrome_options = webdriver.ChromeOptions()
-    chrome_options.add_argument("--headless")
+    chrome_options.add_argument("--headless=new")  # Use new headless mode
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
-    chrome_options.add_argument("--disable-blink-features=AutomationControlled")
     chrome_options.add_argument("--disable-gpu")
-    chrome_options.add_argument("--remote-debugging-port=9222")
+    chrome_options.add_argument("--disable-software-rasterizer")
+    chrome_options.add_argument("--disable-background-timer-throttling")
+    chrome_options.add_argument("--disable-backgrounding-occluded-windows")
+    chrome_options.add_argument("--disable-renderer-backgrounding")
+    chrome_options.add_argument("--disable-features=TranslateUI,BlinkGenPropertyTrees")
+    chrome_options.add_argument("--disable-extensions")
+    chrome_options.add_argument("--disable-plugins")
+    chrome_options.add_argument("--disable-images")  # Don't load images to save memory
+    chrome_options.add_argument("--disable-javascript")  # Disable JS initially
     chrome_options.add_argument("--memory-pressure-off")
-    chrome_options.add_argument("--max_old_space_size=4096")
-    chrome_options.add_argument("--page-load-strategy=eager")  # Don't wait for all resources
+    chrome_options.add_argument("--max_old_space_size=1024")  # Very conservative memory limit
+    chrome_options.add_argument("--aggressive-cache-discard")
+    chrome_options.add_argument("--single-process")
+    chrome_options.add_argument("--disable-background-networking")
+    chrome_options.add_argument("--disable-default-apps")
+    chrome_options.add_argument("--disable-sync")
+    chrome_options.add_argument("--no-first-run")
+    chrome_options.add_argument("--disable-blink-features=AutomationControlled")
     chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
     chrome_options.add_experimental_option('useAutomationExtension', False)
     
-    # Add user agent to appear more legitimate
-    chrome_options.add_argument("--user-agent=Mozilla/5.0 (Linux; x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+    # Minimal user agent
+    chrome_options.add_argument("--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36")
     
     driver = None
     try:
+        print("Initializing minimal Chrome WebDriver...")
+        
         # Use webdriver-manager for automatic ChromeDriver management
         service = Service(ChromeDriverManager().install())
+        
+        # Create driver with minimal configuration
         driver = webdriver.Chrome(service=service, options=chrome_options)
+        print("✅ Chrome WebDriver created")
         
-        # Set timeouts to prevent hanging
-        driver.set_page_load_timeout(30)  # 30 second page load timeout
-        driver.implicitly_wait(10)  # 10 second element wait timeout
+        # Set aggressive timeouts
+        driver.set_page_load_timeout(15)  # Very short timeout
+        driver.implicitly_wait(3)  # Very short wait
         
-        driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+        print("✅ Chrome WebDriver configured with timeouts")
+        
     except Exception as e:
-        print(f"Error initializing WebDriver: {e}")
+        print(f"❌ Error initializing WebDriver: {e}")
         if driver:
-            driver.quit()
+            try:
+                driver.quit()
+            except:
+                pass
         return False
 
     try:
@@ -84,38 +106,18 @@ def extend_google_youtube_session():
             print("Failed to load existing cookies")
             return False
         
-        # Navigate to YouTube to verify session
-        print("🔍 Verifying session on YouTube...")
-        driver.get("https://www.youtube.com")
-        time.sleep(5)  # Give more time for page load
+        # Quick session verification
+        print("🔍 Verifying session...")
+        driver.get("https://youtube.com")
+        time.sleep(2)  # Minimal wait
         
-        # Check if we're signed in by looking for multiple indicators
-        signed_in = False
-        try:
-            # Method 1: Look for avatar renderer (most reliable)
-            avatar_renderer = driver.find_element(By.CSS_SELECTOR, "yt-img-shadow#avatar")
-            print("✅ Successfully detected signed-in session (avatar renderer found)!")
-            signed_in = True
-        except:
-            try:
-                # Method 2: Look for user avatar button
-                avatar = driver.find_element(By.CSS_SELECTOR, "button[aria-label*='Account menu']")
-                print("✅ Successfully detected signed-in session (account menu found)!")
-                signed_in = True
-            except:
-                try:
-                    # Method 3: Look for profile button
-                    profile = driver.find_element(By.CSS_SELECTOR, "button[aria-label*='profile']")
-                    print("✅ Successfully detected signed-in session (profile button found)!")
-                    signed_in = True
-                except:
-                    # Method 4: Check page source for sign-in indicators
-                    page_source = driver.page_source.lower()
-                    if '"signedIn":true' in page_source or 'avatar-btn' in page_source:
-                        print("✅ Successfully detected signed-in session (page source analysis)!")
-                        signed_in = True
-                    elif 'sign in' in page_source and 'sign out' not in page_source:
-                        print("❌ Session appears to be expired - 'Sign in' detected without 'Sign out'")
+        # Simple URL-based check
+        current_url = driver.current_url.lower()
+        if "accounts.google.com" in current_url or "signin" in current_url:
+            print("❌ Session expired - redirected to sign-in")
+            return False
+        
+        print("✅ Session appears valid")
                         return False
                     else:
                         print("🤔 Unable to determine sign-in status clearly, proceeding with refresh...")
@@ -125,30 +127,19 @@ def extend_google_youtube_session():
             print("❌ Could not verify signed-in session")
             return False
         
-        # Navigate to different Google services to refresh tokens
-        refresh_urls = [
-            "https://www.youtube.com/feed/subscriptions",
-            "https://accounts.google.com/",
-            "https://myaccount.google.com/"
-        ]
-        
-        for url in refresh_urls:
-            try:
-                print(f"Refreshing session at {url}")
-                driver.get(url)
-                time.sleep(2)
-            except Exception as e:
-                print(f"Warning: Could not access {url}: {e}")
-                continue
+        # Simple token refresh - just visit YouTube once more
+        print("Refreshing tokens...")
+        driver.get("https://youtube.com")
+        time.sleep(1)
         
         # Extract updated cookies
-        print("Extracting updated session cookies...")
+        print("Extracting session cookies...")
         selenium_cookies = driver.get_cookies()
         
         # Save updated cookies in Netscape format
         save_google_cookies_netscape(selenium_cookies)
         
-        print(f"Successfully extended Google/YouTube session and saved to {GOOGLE_COOKIES_FILE}")
+        print(f"✅ Session extended and saved to {GOOGLE_COOKIES_FILE}")
         return True
 
     except Exception as e:
@@ -254,10 +245,9 @@ def load_cookies_from_file(driver, cookies_file):
                 
             try:
                 target_url = domain_urls[bucket_name]
-                print(f"🌐 Navigating to {target_url} for {len(cookies)} cookies...")
-                
+                print(f"🌐 Loading cookies for {target_url}...")
                 driver.get(target_url)
-                time.sleep(3)  # Wait for page load
+                time.sleep(1)  # Minimal wait
                 
                 # Inject cookies in smaller batches to avoid timeouts
                 batch_size = 10
