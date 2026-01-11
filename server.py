@@ -342,6 +342,12 @@ def download_video():
             "quiet": False,
             "noprogress": True,
             "merge_output_format": "mp4",
+            # Enable challenge solving for YouTube signature protection
+            "extractor_args": {
+                "youtube": {
+                    "remote_components": ["ejs:github"]
+                }
+            }
         }
 
         # --- Determine platform-specific strategy ---
@@ -353,25 +359,20 @@ def download_video():
                 logger.info("🍪 Using Google cookies for YouTube")
                 ydl_opts["cookiefile"] = GOOGLE_COOKIES_FILE
                 
-                # Try to use the exact User-Agent from cookie generation
-                chrome_version_file = os.path.join(os.getcwd(), "chrome_version.json")
-                if os.path.exists(chrome_version_file):
-                    try:
-                        with open(chrome_version_file, 'r') as f:
-                            version_info = json.load(f)
-                        
-                        ydl_opts["user_agent"] = version_info["user_agent"]
-                        logger.info(f"🔧 Using exact User-Agent from cookie generation: Chrome/{version_info['chrome_version']}")
-                    except Exception as e:
-                        logger.warning(f"Could not load Chrome version info: {e}")
-                        # Fallback to Chrome 143 (current version on Render)
-                        ydl_opts["user_agent"] = (
-                            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                            "(KHTML, like Gecko) Chrome/143.0.7499.192 Safari/537.36"
-                        )
-                        logger.info("🔧 Using fallback Chrome 143 User-Agent")
-                else:
-                    # Fallback to Chrome 143 (current version on Render)
+                # Use the EXACT same User-Agent as Selenium to avoid cookie rejection
+                REAL_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.7499.192 Safari/537.36"
+                ydl_opts["user_agent"] = REAL_USER_AGENT
+                logger.info("🎭 Using matching desktop User-Agent for cookie compatibility")
+                
+                # Keep challenge solving enabled for signed-in downloads
+                if "extractor_args" not in ydl_opts:
+                    ydl_opts["extractor_args"] = {}
+                if "youtube" not in ydl_opts["extractor_args"]:
+                    ydl_opts["extractor_args"]["youtube"] = {}
+                
+                ydl_opts["extractor_args"]["youtube"]["remote_components"] = ["ejs:github"]
+                logger.info("🔧 Challenge solving enabled for signed-in downloads")
+            else:
                     ydl_opts["user_agent"] = (
                         "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
                         "(KHTML, like Gecko) Chrome/143.0.7499.192 Safari/537.36"

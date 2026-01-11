@@ -74,7 +74,11 @@ def extend_google_youtube_session():
     }
     chrome_options.add_experimental_option("prefs", prefs)
     
-    # Let Chrome use its natural User-Agent (don't override to avoid version mismatch)
+    # Use a REAL desktop User-Agent to avoid "HeadlessChrome" detection
+    REAL_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.7499.192 Safari/537.36"
+    chrome_options.add_argument(f"--user-agent={REAL_USER_AGENT}")
+    
+    print(f"🎭 Using real desktop User-Agent: {REAL_USER_AGENT}")
     
     driver = None
     try:
@@ -145,25 +149,27 @@ def extend_google_youtube_session():
         # Save the Chrome version info for yt-dlp compatibility
         try:
             chrome_version = driver.capabilities['browserVersion']
-            user_agent = driver.execute_script("return navigator.userAgent;")
+            # Get the actual User-Agent that was set
+            REAL_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.7499.192 Safari/537.36"
             
             # Extract Chrome version for yt-dlp
             import re
-            chrome_match = re.search(r'Chrome/(\d+\.\d+\.\d+\.\d+)', user_agent)
+            chrome_match = re.search(r'Chrome/(\d+\.\d+\.\d+\.\d+)', REAL_USER_AGENT)
             if chrome_match:
                 chrome_version_full = chrome_match.group(1)
                 
                 # Save version info for server.py to use
                 version_info = {
                     "chrome_version": chrome_version_full,
-                    "user_agent": user_agent,
-                    "timestamp": time.time()
+                    "user_agent": REAL_USER_AGENT,
+                    "timestamp": time.time(),
+                    "real_desktop_ua": True
                 }
                 
                 with open(os.path.join(os.getcwd(), "chrome_version.json"), "w") as f:
                     json.dump(version_info, f)
                 
-                print(f"💾 Saved Chrome version info: {chrome_version_full}")
+                print(f"💾 Saved real desktop User-Agent: {chrome_version_full}")
         except Exception as e:
             print(f"⚠️ Could not save Chrome version info: {e}")
         
