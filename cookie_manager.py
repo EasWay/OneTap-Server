@@ -22,11 +22,11 @@ def extend_google_youtube_session():
     Returns:
         bool: True if session was successfully extended, False otherwise.
     """
-    print("--- Attempting to extend Google/YouTube session ---")
+    print("--- 🚀 Starting YouTube session extension ---")
     
     # Check if existing Google cookies file exists
     if not os.path.exists(GOOGLE_COOKIES_FILE):
-        print(f"No existing Google cookies found at {GOOGLE_COOKIES_FILE}")
+        print(f"❌ No Google cookies found at {GOOGLE_COOKIES_FILE}")
         print("Please upload your Google cookies file first.")
         return False
     
@@ -34,11 +34,11 @@ def extend_google_youtube_session():
     try:
         file_size = os.path.getsize(GOOGLE_COOKIES_FILE)
         if file_size == 0:
-            print(f"Google cookies file is empty: {GOOGLE_COOKIES_FILE}")
+            print(f"❌ Google cookies file is empty: {GOOGLE_COOKIES_FILE}")
             return False
-        print(f"Found Google cookies file ({file_size} bytes)")
+        print(f"✅ Found Google cookies file ({file_size} bytes)")
     except Exception as e:
-        print(f"Error checking cookies file: {e}")
+        print(f"❌ Error checking cookies file: {e}")
         return False
     
     # Setup Chrome options for minimal memory usage on constrained servers
@@ -73,14 +73,14 @@ def extend_google_youtube_session():
     
     driver = None
     try:
-        print("Initializing minimal Chrome WebDriver...")
+        print("🔧 Initializing minimal Chrome WebDriver...")
         
         # Use webdriver-manager for automatic ChromeDriver management
         service = Service(ChromeDriverManager().install())
         
         # Create driver with minimal configuration
         driver = webdriver.Chrome(service=service, options=chrome_options)
-        print("✅ Chrome WebDriver created")
+        print("✅ Chrome WebDriver created successfully")
         
         # Set aggressive timeouts
         driver.set_page_load_timeout(15)  # Very short timeout
@@ -99,12 +99,14 @@ def extend_google_youtube_session():
 
     try:
         # Load existing cookies from file (this will handle navigation)
-        print("Loading existing Google cookies...")
+        print("🍪 Loading existing Google cookies...")
         cookies_loaded = load_cookies_from_file(driver, GOOGLE_COOKIES_FILE)
         
         if not cookies_loaded:
-            print("Failed to load existing cookies")
+            print("❌ Failed to load existing cookies")
             return False
+        
+        print("✅ Cookies loaded successfully")
         
         # Quick session verification
         print("🔍 Verifying session...")
@@ -113,6 +115,8 @@ def extend_google_youtube_session():
         
         # Simple URL-based check
         current_url = driver.current_url.lower()
+        print(f"📍 Current URL: {current_url}")
+        
         if "accounts.google.com" in current_url or "signin" in current_url:
             print("❌ Session expired - redirected to sign-in")
             return False
@@ -120,13 +124,14 @@ def extend_google_youtube_session():
         print("✅ Session appears valid")
         
         # Simple token refresh - just visit YouTube once more
-        print("Refreshing tokens...")
+        print("🔄 Refreshing tokens...")
         driver.get("https://youtube.com")
         time.sleep(1)
         
         # Extract updated cookies
-        print("Extracting session cookies...")
+        print("📦 Extracting session cookies...")
         selenium_cookies = driver.get_cookies()
+        print(f"📊 Found {len(selenium_cookies)} cookies")
         
         # Save updated cookies in Netscape format
         save_google_cookies_netscape(selenium_cookies)
@@ -135,16 +140,19 @@ def extend_google_youtube_session():
         return True
 
     except Exception as e:
-        print(f"An error occurred during session extension: {e}")
+        print(f"❌ An error occurred during session extension: {e}")
+        import traceback
+        print(f"🔍 Traceback: {traceback.format_exc()}")
         return False
     
     finally:
         if driver:
             try:
+                print("🧹 Cleaning up Chrome WebDriver...")
                 driver.quit()
             except Exception as quit_error:
-                print(f"Warning: Error closing driver: {quit_error}")
-        print("--- Session extension finished ---")
+                print(f"⚠️ Warning: Error closing driver: {quit_error}")
+        print("--- 🏁 Session extension finished ---")
 
 def load_cookies_from_file(driver, cookies_file):
     """
@@ -158,6 +166,7 @@ def load_cookies_from_file(driver, cookies_file):
     Returns:
         bool: True if cookies were loaded successfully
     """
+    print(f"📂 Reading cookies from {cookies_file}")
     try:
         with open(cookies_file, 'r') as f:
             lines = f.readlines()
@@ -188,6 +197,7 @@ def load_cookies_from_file(driver, cookies_file):
                 # Only process Google/YouTube related domains
                 google_domains = ['google.com', 'youtube.com', 'googlevideo.com', 'gstatic.com', 'googleapis.com']
                 if any(gd in domain for gd in google_domains):
+                    print(f"✅ Processing Google cookie: {domain} -> {name}")
                     
                     cookie_dict = {
                         'name': name,
