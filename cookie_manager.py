@@ -41,7 +41,7 @@ def extend_google_youtube_session():
         print(f"❌ Error checking cookies file: {e}")
         return False
     
-    # Setup Chrome options for ultra-minimal memory usage
+    # Setup Chrome options for ultra-minimal memory usage + STEALTH MODE
     chrome_options = webdriver.ChromeOptions()
     chrome_options.add_argument("--headless=new")  # Use new efficient headless mode
     chrome_options.add_argument("--no-sandbox")
@@ -55,7 +55,6 @@ def extend_google_youtube_session():
     chrome_options.add_argument("--disable-extensions")
     chrome_options.add_argument("--disable-plugins")
     chrome_options.add_argument("--disable-images")  # Don't load images to save memory
-    chrome_options.add_argument("--disable-javascript")  # Disable JS initially
     chrome_options.add_argument("--memory-pressure-off")
     chrome_options.add_argument("--max_old_space_size=1024")  # Very conservative memory limit
     chrome_options.add_argument("--aggressive-cache-discard")
@@ -64,13 +63,22 @@ def extend_google_youtube_session():
     chrome_options.add_argument("--disable-default-apps")
     chrome_options.add_argument("--disable-sync")
     chrome_options.add_argument("--no-first-run")
-    chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+    
+    # CRITICAL STEALTH MODE FLAGS - These prevent bot detection
+    chrome_options.add_argument("--disable-blink-features=AutomationControlled")  # Most important!
     chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
     chrome_options.add_experimental_option('useAutomationExtension', False)
     
+    # Additional stealth flags
+    chrome_options.add_argument("--disable-web-security")
+    chrome_options.add_argument("--disable-features=VizDisplayCompositor")
+    chrome_options.add_argument("--disable-ipc-flooding-protection")
+    
     # Disable stylesheets to save even more memory
     prefs = {
-        "profile.managed_default_content_settings.stylesheets": 2
+        "profile.managed_default_content_settings.stylesheets": 2,
+        "profile.default_content_setting_values.notifications": 2,
+        "profile.managed_default_content_settings.media_stream": 2
     }
     chrome_options.add_experimental_option("prefs", prefs)
     
@@ -91,6 +99,13 @@ def extend_google_youtube_session():
         # Create driver with minimal configuration
         driver = webdriver.Chrome(service=service, options=chrome_options)
         print("✅ Chrome WebDriver created successfully")
+        
+        # STEALTH MODE: Remove automation indicators
+        driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+        driver.execute_script("Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]})")
+        driver.execute_script("Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']})")
+        driver.execute_script("window.chrome = { runtime: {} }")
+        print("🥷 Stealth mode activated - automation indicators removed")
         
         # Get the actual Chrome version from the browser
         chrome_version = driver.capabilities['browserVersion']
@@ -123,6 +138,27 @@ def extend_google_youtube_session():
             return False
         
         print("✅ Cookies loaded successfully")
+        
+        # SESSION WARMING: Visit YouTube to generate internal tokens and warm the session
+        print("� Wearming session with YouTube homepage...")
+        try:
+            driver.get("https://www.youtube.com")
+            time.sleep(5)  # Allow YouTube's scripts to run and generate tokens
+            
+            # Check if we can access the page without bot challenges
+            page_title = driver.title
+            if "YouTube" in page_title:
+                print(f"✅ Session warming successful - Page title: {page_title}")
+            else:
+                print(f"⚠️ Unexpected page title during warming: {page_title}")
+            
+            # Get updated cookies after warming
+            warmed_cookies = driver.get_cookies()
+            print(f"🔥 Session warmed - Total cookies after warming: {len(warmed_cookies)}")
+            
+        except Exception as warming_error:
+            print(f"⚠️ Session warming failed: {warming_error}")
+            print("Proceeding with existing cookies...")
         
         # Lightweight verification - check if important cookies are present
         print("🔍 Verifying session cookies...")
@@ -294,13 +330,13 @@ def load_cookies_from_file(driver, cookies_file):
         
         total_cookies_loaded = 0
         
-        # Process each domain bucket with lightweight robots.txt navigation
+        # Process each domain bucket with lightweight navigation to proper subdomains
         domain_urls = {
             'accounts.google.com': 'https://accounts.google.com/robots.txt',
-            'google.com': 'https://google.com/robots.txt',
-            'youtube.com': 'https://youtube.com/robots.txt',
-            'googlevideo.com': 'https://youtube.com/robots.txt',  # Use YouTube robots.txt for googlevideo cookies
-            'other_google': 'https://google.com/robots.txt'
+            'google.com': 'https://www.google.com/robots.txt',  # Use www subdomain
+            'youtube.com': 'https://www.youtube.com/robots.txt',  # Use www subdomain
+            'googlevideo.com': 'https://www.youtube.com/robots.txt',  # Use YouTube robots.txt for googlevideo cookies
+            'other_google': 'https://www.google.com/robots.txt'  # Use www subdomain
         }
         
         for bucket_name, cookies in domain_buckets.items():

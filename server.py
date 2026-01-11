@@ -386,7 +386,7 @@ def download_video():
             "extractor_args": {
                 "youtube": {
                     "remote_components": ["ejs:github"],
-                    "player_client": ["web"],
+                    "player_client": ["web", "ios"],  # iOS client is more bot-resistant
                     "js_engine": "deno",
                     # Additional options to handle bot detection
                     "skip": ["hls", "dash"],  # Skip adaptive formats that might trigger bot detection
