@@ -74,9 +74,32 @@ class OneTapDownloader:
                 chrome_options.add_argument("--disable-ipc-flooding-protection")
                 chrome_options.add_argument("--memory-pressure-off")
                 chrome_options.add_argument("--max_old_space_size=4096")
+                chrome_options.add_argument("--remote-debugging-port=9222")
+                chrome_options.add_argument("--disable-extensions")
+                chrome_options.add_argument("--disable-plugins")
+                chrome_options.add_argument("--disable-images")
+                chrome_options.add_argument("--disable-javascript")
                 
-                # Use system Chrome on Render
-                chrome_options.binary_location = "/usr/bin/google-chrome"
+                # Try multiple Chrome binary locations for Render
+                possible_chrome_paths = [
+                    "/usr/bin/google-chrome",
+                    "/usr/bin/google-chrome-stable", 
+                    "/usr/bin/chromium-browser",
+                    "/usr/bin/chromium",
+                    "/opt/google/chrome/chrome"
+                ]
+                
+                chrome_binary = None
+                for path in possible_chrome_paths:
+                    if os.path.exists(path):
+                        chrome_binary = path
+                        break
+                
+                if chrome_binary:
+                    chrome_options.binary_location = chrome_binary
+                    logger.info(f"🔍 Using Chrome binary: {chrome_binary}")
+                else:
+                    logger.warning("⚠️ No Chrome binary found, using default")
             else:
                 # Local development options
                 chrome_options.add_argument("--headless=new")
@@ -90,11 +113,28 @@ class OneTapDownloader:
             chrome_options.add_argument("--window-size=1920,1080")
             chrome_options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
             
-            # Create driver
+            # Create driver with better error handling
             if IS_RENDER:
-                # Use system chromedriver on Render
-                service = Service("/usr/bin/chromedriver")
-                self.driver = webdriver.Chrome(service=service, options=chrome_options)
+                # Try multiple chromedriver locations for Render
+                possible_driver_paths = [
+                    "/usr/bin/chromedriver",
+                    "/usr/local/bin/chromedriver",
+                    "/opt/chromedriver/chromedriver"
+                ]
+                
+                driver_path = None
+                for path in possible_driver_paths:
+                    if os.path.exists(path):
+                        driver_path = path
+                        break
+                
+                if driver_path:
+                    service = Service(driver_path)
+                    logger.info(f"🔍 Using chromedriver: {driver_path}")
+                    self.driver = webdriver.Chrome(service=service, options=chrome_options)
+                else:
+                    logger.info("🔍 Using default chromedriver location")
+                    self.driver = webdriver.Chrome(options=chrome_options)
             else:
                 self.driver = webdriver.Chrome(options=chrome_options)
             
@@ -108,6 +148,7 @@ class OneTapDownloader:
             
         except Exception as e:
             logger.error(f"❌ Error setting up Chrome driver: {str(e)}")
+            logger.info("💡 Trying fallback yt-dlp only mode...")
             return False
     
     def load_authenticated_cookies(self):
@@ -180,7 +221,64 @@ class OneTapDownloader:
             logger.error(f"❌ Error loading cookies: {str(e)}")
             return False
     
-    def extract_video_info(self, url):
+    def extract_video_info_fallback(self, url):
+        """Extract video information using yt-dlp only (fallback when Selenium fails)"""
+        try:
+            import yt_dlp
+            
+            logger.info(f"🔍 Extracting video info using yt-dlp fallback from: {url}")
+            
+            # yt-dlp options for info extraction only
+            ydl_opts = {
+                "quiet": True,
+                "no_warnings": True,
+                "extract_flat": False
+            }
+            
+            # Add cookies if available
+            cookies_sources = []
+            if IS_RENDER and os.path.exists(COOKIES_FILE):
+                cookies_sources.append(COOKIES_FILE)
+            
+            local_cookies = os.path.join(os.getcwd(), "google_cookies.txt")
+            if os.path.exists(local_cookies):
+                cookies_sources.append(local_cookies)
+            
+            if cookies_sources:
+                ydl_opts["cookiefile"] = cookies_sources[0]
+                logger.info(f"🍪 Using cookies from: {cookies_sources[0]}")
+            
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+                
+                title = info.get('title', 'Unknown')
+                duration = info.get('duration', 0)
+                video_id = info.get('id', self.extract_video_id(url))
+                
+                logger.info(f"📺 Video title: {title}")
+                logger.info(f"⏱️ Video duration: {duration}s")
+                
+                return {
+                    "title": title,
+                    "duration": duration,
+                    "video_id": video_id,
+                    "original_url": url,
+                    "cookies_used": len(cookies_sources) > 0,
+                    "method": "yt-dlp_fallback"
+                }
+                
+        except Exception as e:
+            logger.error(f"❌ Error extracting video info with yt-dlp: {str(e)}")
+            # Return basic info from URL
+            video_id = self.extract_video_id(url)
+            return {
+                "title": f"Video {video_id}" if video_id else "Unknown Video",
+                "duration": 0,
+                "video_id": video_id,
+                "original_url": url,
+                "cookies_used": False,
+                "method": "basic_fallback"
+            }
         """Extract video information using Selenium"""
         try:
             logger.info(f"🔍 Extracting video info from: {url}")
@@ -377,7 +475,7 @@ def home():
 
 @app.route("/download", methods=["POST"])
 def download_video():
-    """Download video using authenticated Chrome profile"""
+    """Download video using authenticated Chrome profile or fallback methods"""
     logger.info(f"🚀 Download request received ({'Render' if IS_RENDER else 'Local'} mode)")
     
     downloader = None
@@ -390,12 +488,17 @@ def download_video():
         # Initialize downloader
         downloader = OneTapDownloader()
         
-        if not downloader.setup_driver():
-            return jsonify({"error": "Failed to initialize Chrome driver"}), 500
-
-        # Extract video information
-        logger.info("🔍 Extracting video information...")
-        video_info = downloader.extract_video_info(url)
+        # Try to setup Chrome driver, but continue without it if it fails
+        chrome_available = downloader.setup_driver()
+        
+        if chrome_available:
+            # Extract video information using Selenium
+            logger.info("🔍 Extracting video information with Chrome...")
+            video_info = downloader.extract_video_info(url)
+        else:
+            # Fallback to yt-dlp only extraction
+            logger.info("🔍 Extracting video information with yt-dlp fallback...")
+            video_info = downloader.extract_video_info_fallback(url)
         
         if not video_info:
             return jsonify({"error": "Failed to extract video information"}), 400
@@ -414,8 +517,10 @@ def download_video():
             "filename": filename,
             "title": video_info["title"],
             "duration": video_info["duration"],
-            "method": f"authenticated_{'render' if IS_RENDER else 'local'}",
-            "environment": "render" if IS_RENDER else "local"
+            "method": f"{'chrome_' if chrome_available else 'yt-dlp_'}{'render' if IS_RENDER else 'local'}",
+            "environment": "render" if IS_RENDER else "local",
+            "chrome_available": chrome_available,
+            "extraction_method": video_info.get("method", "unknown")
         })
 
     except Exception as e:
@@ -507,6 +612,21 @@ def files(filename):
 def system_status():
     """System status"""
     try:
+        # Check Chrome availability
+        chrome_available = False
+        chrome_status = "not_available"
+        
+        try:
+            test_downloader = OneTapDownloader()
+            chrome_available = test_downloader.setup_driver()
+            if chrome_available:
+                chrome_status = "available"
+                test_downloader.cleanup()
+            else:
+                chrome_status = "setup_failed"
+        except Exception as e:
+            chrome_status = f"error: {str(e)}"
+        
         # Check cookie availability
         cookies_available = False
         cookie_sources = []
@@ -520,11 +640,24 @@ def system_status():
             cookies_available = True
             cookie_sources.append("local_profile")
         
+        # Determine bot resistance level
+        if chrome_available and cookies_available:
+            bot_resistance = "Maximum (Chrome + Authenticated Cookies)"
+        elif chrome_available:
+            bot_resistance = "High (Chrome Only)"
+        elif cookies_available:
+            bot_resistance = "Medium (yt-dlp + Cookies)"
+        else:
+            bot_resistance = "Basic (yt-dlp Only)"
+        
         status = {
             "status": "online",
             "environment": "render" if IS_RENDER else "local",
-            "server_mode": "OneTap Server with Maximum Bot Resistance",
-            "chrome_available": True,
+            "server_mode": "OneTap Server with Adaptive Bot Resistance",
+            "chrome": {
+                "available": chrome_available,
+                "status": chrome_status
+            },
             "cookies": {
                 "available": cookies_available,
                 "sources": cookie_sources
@@ -533,17 +666,31 @@ def system_status():
                 "exists": os.path.exists(DOWNLOAD_DIR),
                 "files_count": len(os.listdir(DOWNLOAD_DIR)) if os.path.exists(DOWNLOAD_DIR) else 0
             },
-            "bot_resistance": "Maximum (Selenium + Authenticated Cookies)" if cookies_available else "High (Selenium Only)",
+            "bot_resistance": bot_resistance,
+            "capabilities": [],
             "recommendations": []
         }
         
+        # Add capabilities
+        if chrome_available:
+            status["capabilities"].append("Chrome browser automation")
+        status["capabilities"].append("yt-dlp video extraction")
+        if cookies_available:
+            status["capabilities"].append("Authenticated downloads")
+        
+        # Add recommendations
+        if not chrome_available and IS_RENDER:
+            status["recommendations"].append("Chrome not available on Render - using yt-dlp fallback")
+        elif not chrome_available:
+            status["recommendations"].append("Install Chrome/Chromedriver for better bot resistance")
+            
         if not cookies_available:
             if IS_RENDER:
                 status["recommendations"].append("Upload cookies using /upload_cookies endpoint")
             else:
-                status["recommendations"].append("Create authenticated profile using robust_profile_manager.py")
+                status["recommendations"].append("Create authenticated profile for better success rate")
         else:
-            status["recommendations"].append("Maximum bot resistance active")
+            status["recommendations"].append(f"{bot_resistance} active")
             
         return jsonify(status)
         
