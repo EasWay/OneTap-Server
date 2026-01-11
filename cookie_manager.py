@@ -74,8 +74,7 @@ def extend_google_youtube_session():
     }
     chrome_options.add_experimental_option("prefs", prefs)
     
-    # Minimal user agent
-    chrome_options.add_argument("--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36")
+    # Let Chrome use its natural User-Agent (don't override to avoid version mismatch)
     
     driver = None
     try:
@@ -87,6 +86,12 @@ def extend_google_youtube_session():
         # Create driver with minimal configuration
         driver = webdriver.Chrome(service=service, options=chrome_options)
         print("✅ Chrome WebDriver created successfully")
+        
+        # Get the actual Chrome version from the browser
+        chrome_version = driver.capabilities['browserVersion']
+        actual_user_agent = driver.execute_script("return navigator.userAgent;")
+        print(f"🔍 Detected Chrome version: {chrome_version}")
+        print(f"🔍 Actual User-Agent: {actual_user_agent}")
         
         # Set aggressive timeouts
         driver.set_page_load_timeout(15)  # Very short timeout
@@ -136,6 +141,31 @@ def extend_google_youtube_session():
         
         # Save updated cookies in Netscape format
         save_google_cookies_netscape(selenium_cookies)
+        
+        # Save the Chrome version info for yt-dlp compatibility
+        try:
+            chrome_version = driver.capabilities['browserVersion']
+            user_agent = driver.execute_script("return navigator.userAgent;")
+            
+            # Extract Chrome version for yt-dlp
+            import re
+            chrome_match = re.search(r'Chrome/(\d+\.\d+\.\d+\.\d+)', user_agent)
+            if chrome_match:
+                chrome_version_full = chrome_match.group(1)
+                
+                # Save version info for server.py to use
+                version_info = {
+                    "chrome_version": chrome_version_full,
+                    "user_agent": user_agent,
+                    "timestamp": time.time()
+                }
+                
+                with open(os.path.join(os.getcwd(), "chrome_version.json"), "w") as f:
+                    json.dump(version_info, f)
+                
+                print(f"💾 Saved Chrome version info: {chrome_version_full}")
+        except Exception as e:
+            print(f"⚠️ Could not save Chrome version info: {e}")
         
         print(f"✅ Session extended and saved to {GOOGLE_COOKIES_FILE}")
         return True

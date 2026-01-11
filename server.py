@@ -3,6 +3,7 @@ import uuid
 import logging
 import threading
 import time
+import json
 from datetime import datetime, timedelta
 from flask import Flask, request, jsonify, send_from_directory
 import yt_dlp
@@ -282,10 +283,31 @@ def download_video():
             if os.path.exists(GOOGLE_COOKIES_FILE):
                 logger.info("🍪 Using Google cookies for YouTube")
                 ydl_opts["cookiefile"] = GOOGLE_COOKIES_FILE
-                ydl_opts["user_agent"] = (
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-                )
+                
+                # Try to use the exact User-Agent from cookie generation
+                chrome_version_file = os.path.join(os.getcwd(), "chrome_version.json")
+                if os.path.exists(chrome_version_file):
+                    try:
+                        with open(chrome_version_file, 'r') as f:
+                            version_info = json.load(f)
+                        
+                        ydl_opts["user_agent"] = version_info["user_agent"]
+                        logger.info(f"🔧 Using exact User-Agent from cookie generation: Chrome/{version_info['chrome_version']}")
+                    except Exception as e:
+                        logger.warning(f"Could not load Chrome version info: {e}")
+                        # Fallback to Chrome 143 (current version on Render)
+                        ydl_opts["user_agent"] = (
+                            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                            "(KHTML, like Gecko) Chrome/143.0.7499.192 Safari/537.36"
+                        )
+                        logger.info("🔧 Using fallback Chrome 143 User-Agent")
+                else:
+                    # Fallback to Chrome 143 (current version on Render)
+                    ydl_opts["user_agent"] = (
+                        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                        "(KHTML, like Gecko) Chrome/143.0.7499.192 Safari/537.36"
+                    )
+                    logger.info("🔧 Using fallback Chrome 143 User-Agent (no version file)")
             else:
                 logger.info("📱 Using android_tv client for YouTube (no cookies)")
                 ydl_opts["extractor_args"] = {"youtube": {"player_client": ["android_tv"]}}
