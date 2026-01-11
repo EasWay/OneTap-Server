@@ -75,6 +75,7 @@ def extend_google_youtube_session():
     chrome_options.add_experimental_option("prefs", prefs)
     
     # Use a REAL desktop User-Agent to avoid "HeadlessChrome" detection
+    # This should match exactly what yt-dlp will use
     REAL_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.7499.192 Safari/537.36"
     chrome_options.add_argument(f"--user-agent={REAL_USER_AGENT}")
     
@@ -149,7 +150,7 @@ def extend_google_youtube_session():
         # Save the Chrome version info for yt-dlp compatibility
         try:
             chrome_version = driver.capabilities['browserVersion']
-            # Get the actual User-Agent that was set
+            # Use the exact same User-Agent that was set above
             REAL_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.7499.192 Safari/537.36"
             
             # Extract Chrome version for yt-dlp
@@ -169,7 +170,7 @@ def extend_google_youtube_session():
                 with open(os.path.join(os.getcwd(), "chrome_version.json"), "w") as f:
                     json.dump(version_info, f)
                 
-                print(f"💾 Saved real desktop User-Agent: {chrome_version_full}")
+                print(f"💾 Saved Chrome version info: {chrome_version_full}")
         except Exception as e:
             print(f"⚠️ Could not save Chrome version info: {e}")
         

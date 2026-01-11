@@ -28,8 +28,47 @@ GOOGLE_COOKIES_FILE = os.path.join(os.getcwd(), "google_cookies.txt")
 YOUTUBE_SESSION_INTERVAL_HOURS = 6  # Extend session every 6 hours
 last_youtube_extension = None
 
-# --- VERIFY yt-dlp VERSION ---
+# --- VERIFY yt-dlp VERSION AND JAVASCRIPT RUNTIME ---
 logger.info(f"🦖 yt-dlp Version: {yt_dlp.version.__version__}")
+
+# Install Deno if not available (for Render deployment)
+try:
+    import install_deno
+    install_deno.install_deno()
+except Exception as e:
+    logger.warning(f"Could not run Deno installer: {e}")
+
+# Verify Deno is available for JavaScript challenge solving
+import subprocess
+try:
+    deno_result = subprocess.run(['deno', '--version'], capture_output=True, text=True, timeout=5)
+    if deno_result.returncode == 0:
+        deno_version = deno_result.stdout.split('\n')[0]
+        logger.info(f"✅ Deno JavaScript runtime available: {deno_version}")
+    else:
+        logger.error("❌ Deno not found - YouTube signature solving will fail")
+        logger.error("Try installing Deno manually or check PATH configuration")
+except Exception as e:
+    logger.error(f"❌ Deno check failed: {e}")
+    logger.error(f"Current PATH: {os.environ.get('PATH', 'Not set')}")
+
+# Ensure Deno path is in environment for Render
+render_deno_path = "/opt/render/.deno/bin"
+home_deno_path = os.path.expanduser("~/.deno/bin")
+current_path = os.environ.get('PATH', '')
+
+# Add both possible Deno paths
+for deno_path in [render_deno_path, home_deno_path]:
+    if deno_path not in current_path:
+        os.environ['PATH'] = f"{deno_path}:{current_path}"
+        logger.info(f"🔧 Added Deno path: {deno_path}")
+
+# Also check for Node.js as backup on Render
+node_paths = ["/opt/render/project/.heroku/node/bin", "/usr/bin"]
+for node_path in node_paths:
+    if os.path.exists(node_path) and node_path not in current_path:
+        os.environ['PATH'] = f"{node_path}:{os.environ.get('PATH', '')}"
+        logger.info(f"🔧 Added Node.js path: {node_path}")
 
 def youtube_session_scheduler():
     """Background thread that periodically extends YouTube session"""
@@ -221,6 +260,15 @@ def system_status():
             deno_available = False
             deno_version = None
         
+        # Check Node.js as backup
+        try:
+            node_result = subprocess.run(['node', '--version'], capture_output=True, text=True, timeout=5)
+            node_available = node_result.returncode == 0
+            node_version = node_result.stdout.strip() if node_available else None
+        except:
+            node_available = False
+            node_version = None
+        
         # Check Chrome
         try:
             chrome_result = subprocess.run(['google-chrome', '--version'], capture_output=True, text=True, timeout=5)
@@ -239,7 +287,12 @@ def system_status():
             "deno": {
                 "available": deno_available,
                 "version": deno_version,
-                "status": "✅ JavaScript runtime ready" if deno_available else "⚠️ Missing - may affect some YouTube extractions"
+                "status": "✅ JavaScript runtime ready" if deno_available else "❌ Missing - YouTube signature solving will fail"
+            },
+            "node": {
+                "available": node_available,
+                "version": node_version,
+                "status": "✅ Backup JS runtime available" if node_available else "⚠️ Not available"
             },
             "chrome": {
                 "available": chrome_available,
@@ -247,7 +300,7 @@ def system_status():
                 "status": "✅ Browser ready for cookie generation" if chrome_available else "❌ Missing - cookie generation will fail"
             },
             "yt_dlp_version": yt_dlp.version.__version__,
-            "overall_status": "✅ All systems ready" if all([ffmpeg_available, chrome_available]) else "⚠️ Some components missing"
+            "overall_status": "✅ All systems ready" if all([ffmpeg_available, chrome_available, deno_available]) else "⚠️ Some components missing"
         }
         
         return jsonify(system_info)
@@ -335,19 +388,24 @@ def download_video():
         # --- yt-dlp base options ---
         ydl_opts = {
             "outtmpl": output_template,
-            "format": "bestvideo[vcodec^=avc1][ext=mp4]+bestaudio[ext=m4a]/best[vcodec^=avc1][ext=mp4]/best[ext=mp4]/best",
+            "format": "bestvideo[vcodec^=avc1][height<=1080]+bestaudio[ext=m4a]/best[vcodec^=avc1][height<=1080]/bestvideo[ext=mp4][height<=1080]+bestaudio[ext=m4a]/best[ext=mp4][height<=1080]/best",
             "noplaylist": True,
             "retries": 5,
             "fragment_retries": 5,
             "quiet": False,
             "noprogress": True,
             "merge_output_format": "mp4",
-            # Enable challenge solving for YouTube signature protection
+            # Force Deno usage for JavaScript challenge solving
             "extractor_args": {
                 "youtube": {
-                    "remote_components": ["ejs:github"]
+                    "remote_components": ["ejs:github"],
+                    "player_client": ["web"],
+                    "js_engine": "deno"
                 }
-            }
+            },
+            # Ensure Deno is found in PATH
+            "exec_before_dl_archive": [],
+            "verbose": True  # Enable verbose logging to see Deno usage
         }
 
         # --- Determine platform-specific strategy ---
@@ -360,9 +418,15 @@ def download_video():
                 ydl_opts["cookiefile"] = GOOGLE_COOKIES_FILE
                 
                 # Use the EXACT same User-Agent as Selenium to avoid cookie rejection
-                REAL_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.7499.192 Safari/537.36"
-                ydl_opts["user_agent"] = REAL_USER_AGENT
-                logger.info("🎭 Using matching desktop User-Agent for cookie compatibility")
+                chrome_version_file = os.path.join(os.getcwd(), "chrome_version.json")
+                if os.path.exists(chrome_version_file):
+                    with open(chrome_version_file, 'r') as f:
+                        version_info = json.load(f)
+                    ydl_opts["user_agent"] = version_info["user_agent"]
+                    logger.info(f"🔧 Using exact User-Agent from cookie generation: {version_info['chrome_version']}")
+                else:
+                    logger.error("❌ Chrome version file not found - session extension required first")
+                    return jsonify({"error": "Session extension required. Please call /extend_youtube_session first."}), 400
                 
                 # Keep challenge solving enabled for signed-in downloads
                 if "extractor_args" not in ydl_opts:
@@ -372,12 +436,6 @@ def download_video():
                 
                 ydl_opts["extractor_args"]["youtube"]["remote_components"] = ["ejs:github"]
                 logger.info("🔧 Challenge solving enabled for signed-in downloads")
-            else:
-                    ydl_opts["user_agent"] = (
-                        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                        "(KHTML, like Gecko) Chrome/143.0.7499.192 Safari/537.36"
-                    )
-                    logger.info("🔧 Using fallback Chrome 143 User-Agent (no version file)")
             else:
                 logger.info("📱 Using android_tv client for YouTube (no cookies)")
                 ydl_opts["extractor_args"] = {"youtube": {"player_client": ["android_tv"]}}
