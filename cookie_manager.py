@@ -118,14 +118,6 @@ def extend_google_youtube_session():
             return False
         
         print("✅ Session appears valid")
-                        return False
-                    else:
-                        print("🤔 Unable to determine sign-in status clearly, proceeding with refresh...")
-                        signed_in = True  # Assume success and continue
-        
-        if not signed_in:
-            print("❌ Could not verify signed-in session")
-            return False
         
         # Simple token refresh - just visit YouTube once more
         print("Refreshing tokens...")
