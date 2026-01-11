@@ -142,21 +142,32 @@ def youtube_session_status():
     try:
         google_cookies_exists = os.path.exists(GOOGLE_COOKIES_FILE)
         google_cookies_size = os.path.getsize(GOOGLE_COOKIES_FILE) if google_cookies_exists else 0
+        chrome_version_exists = os.path.exists(os.path.join(os.getcwd(), "chrome_version.json"))
         
         status = {
             "google_cookies_uploaded": google_cookies_exists,
             "google_cookies_size_bytes": google_cookies_size,
+            "chrome_version_saved": chrome_version_exists,
             "last_extension": last_youtube_extension.isoformat() if last_youtube_extension else None,
             "next_scheduled_extension": None,
             "extension_interval_hours": YOUTUBE_SESSION_INTERVAL_HOURS,
             "scheduler_running": True,  # Since we're responding, scheduler thread is alive
-            "current_time": datetime.now().isoformat()
+            "current_time": datetime.now().isoformat(),
+            "persistence_warning": not google_cookies_exists
         }
         
         if last_youtube_extension:
             next_extension = last_youtube_extension + timedelta(hours=YOUTUBE_SESSION_INTERVAL_HOURS)
             status["next_scheduled_extension"] = next_extension.isoformat()
             status["minutes_until_next"] = int((next_extension - datetime.now()).total_seconds() / 60)
+        
+        # Add helpful messages
+        if not google_cookies_exists:
+            status["message"] = "⚠️ No Google cookies found. Upload via /update_google_cookies to enable signed-in YouTube downloads."
+        elif google_cookies_size < 1000:
+            status["message"] = "⚠️ Google cookies file seems small. Consider re-uploading fresh cookies."
+        else:
+            status["message"] = "✅ Google cookies are present and ready for YouTube downloads."
         
         return jsonify(status)
     except Exception as e:
@@ -184,6 +195,64 @@ def debug_files():
         }
         return jsonify(files_info)
     except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/system_status", methods=["GET"])
+def system_status():
+    """Check system capabilities and dependencies"""
+    try:
+        import subprocess
+        
+        # Check FFmpeg
+        try:
+            ffmpeg_result = subprocess.run(['ffmpeg', '-version'], capture_output=True, text=True, timeout=5)
+            ffmpeg_available = ffmpeg_result.returncode == 0
+            ffmpeg_version = ffmpeg_result.stdout.split('\n')[0] if ffmpeg_available else None
+        except:
+            ffmpeg_available = False
+            ffmpeg_version = None
+        
+        # Check Deno
+        try:
+            deno_result = subprocess.run(['deno', '--version'], capture_output=True, text=True, timeout=5)
+            deno_available = deno_result.returncode == 0
+            deno_version = deno_result.stdout.split('\n')[0] if deno_available else None
+        except:
+            deno_available = False
+            deno_version = None
+        
+        # Check Chrome
+        try:
+            chrome_result = subprocess.run(['google-chrome', '--version'], capture_output=True, text=True, timeout=5)
+            chrome_available = chrome_result.returncode == 0
+            chrome_version = chrome_result.stdout.strip() if chrome_available else None
+        except:
+            chrome_available = False
+            chrome_version = None
+        
+        system_info = {
+            "ffmpeg": {
+                "available": ffmpeg_available,
+                "version": ffmpeg_version,
+                "status": "✅ Ready for video merging" if ffmpeg_available else "❌ Missing - video merging will fail"
+            },
+            "deno": {
+                "available": deno_available,
+                "version": deno_version,
+                "status": "✅ JavaScript runtime ready" if deno_available else "⚠️ Missing - may affect some YouTube extractions"
+            },
+            "chrome": {
+                "available": chrome_available,
+                "version": chrome_version,
+                "status": "✅ Browser ready for cookie generation" if chrome_available else "❌ Missing - cookie generation will fail"
+            },
+            "yt_dlp_version": yt_dlp.version.__version__,
+            "overall_status": "✅ All systems ready" if all([ffmpeg_available, chrome_available]) else "⚠️ Some components missing"
+        }
+        
+        return jsonify(system_info)
+    except Exception as e:
+        logger.error(f"System status check failed: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
 @app.route("/validate_cookies", methods=["GET"])
@@ -266,7 +335,7 @@ def download_video():
         # --- yt-dlp base options ---
         ydl_opts = {
             "outtmpl": output_template,
-            "format": "bestvideo[ext=mp4]+bestaudio/best[ext=mp4]/best",
+            "format": "bestvideo[vcodec^=avc1][ext=mp4]+bestaudio[ext=m4a]/best[vcodec^=avc1][ext=mp4]/best[ext=mp4]/best",
             "noplaylist": True,
             "retries": 5,
             "fragment_retries": 5,
@@ -329,10 +398,23 @@ def download_video():
                 logger.info("📱 TikTok/social detected — video-only strategy")
 
         # --- Start download ---
-        logger.info("⬇️ Starting download...")
+        logger.info("⬇️ Starting download with H.264 codec preference...")
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
             filename = os.path.basename(ydl.prepare_filename(info))
+            
+            # Log codec information for debugging
+            try:
+                video_codec = info.get('vcodec', 'unknown')
+                audio_codec = info.get('acodec', 'unknown')
+                container = info.get('ext', 'unknown')
+                logger.info(f"📹 Downloaded: {filename}")
+                logger.info(f"🎥 Video codec: {video_codec}")
+                logger.info(f"🔊 Audio codec: {audio_codec}")
+                logger.info(f"📦 Container: {container}")
+            except Exception as codec_log_error:
+                logger.warning(f"Could not log codec info: {codec_log_error}")
+            
             logger.info(f"✅ Download complete: {filename}")
 
         # --- Return secure HTTPS download link ---
@@ -344,6 +426,78 @@ def download_video():
 
     except Exception as e:
         logger.error(f"❌ Download failed: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/formats", methods=["POST"])
+def check_formats():
+    """Check available formats for a YouTube URL"""
+    try:
+        data = request.get_json()
+        url = data.get("url") if data else None
+        if not url:
+            return jsonify({"error": "No URL provided"}), 400
+        
+        logger.info(f"🔍 Checking formats for: {url}")
+        
+        # Basic yt-dlp options for format checking
+        ydl_opts = {
+            "quiet": True,
+            "no_warnings": True,
+            "listformats": True
+        }
+        
+        # Add cookies if available
+        if "youtube.com" in url or "youtu.be" in url:
+            if os.path.exists(GOOGLE_COOKIES_FILE):
+                ydl_opts["cookiefile"] = GOOGLE_COOKIES_FILE
+                
+                # Use matching User-Agent
+                chrome_version_file = os.path.join(os.getcwd(), "chrome_version.json")
+                if os.path.exists(chrome_version_file):
+                    try:
+                        with open(chrome_version_file, 'r') as f:
+                            version_info = json.load(f)
+                        ydl_opts["user_agent"] = version_info["user_agent"]
+                    except:
+                        ydl_opts["user_agent"] = (
+                            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                            "(KHTML, like Gecko) Chrome/143.0.7499.192 Safari/537.36"
+                        )
+        
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+            
+            formats = []
+            if 'formats' in info:
+                for fmt in info['formats']:
+                    format_info = {
+                        "format_id": fmt.get('format_id'),
+                        "ext": fmt.get('ext'),
+                        "resolution": fmt.get('resolution'),
+                        "vcodec": fmt.get('vcodec'),
+                        "acodec": fmt.get('acodec'),
+                        "filesize": fmt.get('filesize'),
+                        "fps": fmt.get('fps'),
+                        "quality": fmt.get('quality')
+                    }
+                    formats.append(format_info)
+            
+            # Filter for H.264 compatible formats
+            h264_formats = [f for f in formats if f.get('vcodec', '').startswith('avc1')]
+            
+            result = {
+                "title": info.get('title'),
+                "duration": info.get('duration'),
+                "total_formats": len(formats),
+                "h264_formats": len(h264_formats),
+                "formats": formats[:10],  # Show first 10 formats
+                "h264_sample": h264_formats[:5] if h264_formats else []  # Show H.264 formats
+            }
+            
+            return jsonify(result)
+            
+    except Exception as e:
+        logger.error(f"❌ Format check failed: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
 @app.route("/files/<filename>")
