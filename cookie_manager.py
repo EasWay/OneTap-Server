@@ -51,6 +51,7 @@ def extend_google_youtube_session():
     chrome_options.add_argument("--remote-debugging-port=9222")
     chrome_options.add_argument("--memory-pressure-off")
     chrome_options.add_argument("--max_old_space_size=4096")
+    chrome_options.add_argument("--page-load-strategy=eager")  # Don't wait for all resources
     chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
     chrome_options.add_experimental_option('useAutomationExtension', False)
     
@@ -62,6 +63,11 @@ def extend_google_youtube_session():
         # Use webdriver-manager for automatic ChromeDriver management
         service = Service(ChromeDriverManager().install())
         driver = webdriver.Chrome(service=service, options=chrome_options)
+        
+        # Set timeouts to prevent hanging
+        driver.set_page_load_timeout(30)  # 30 second page load timeout
+        driver.implicitly_wait(10)  # 10 second element wait timeout
+        
         driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
     except Exception as e:
         print(f"Error initializing WebDriver: {e}")
@@ -79,37 +85,41 @@ def extend_google_youtube_session():
             return False
         
         # Navigate to YouTube to verify session
-        print("Verifying session on YouTube...")
+        print("🔍 Verifying session on YouTube...")
         driver.get("https://www.youtube.com")
         time.sleep(5)  # Give more time for page load
         
         # Check if we're signed in by looking for multiple indicators
         signed_in = False
         try:
-            # Method 1: Look for user avatar
-            avatar = driver.find_element(By.CSS_SELECTOR, "button[aria-label*='Account menu']")
-            print("✅ Successfully detected signed-in session (avatar found)!")
+            # Method 1: Look for avatar renderer (most reliable)
+            avatar_renderer = driver.find_element(By.CSS_SELECTOR, "yt-img-shadow#avatar")
+            print("✅ Successfully detected signed-in session (avatar renderer found)!")
             signed_in = True
         except:
             try:
-                # Method 2: Look for user profile button
-                profile = driver.find_element(By.CSS_SELECTOR, "button[aria-label*='profile']")
-                print("✅ Successfully detected signed-in session (profile found)!")
+                # Method 2: Look for user avatar button
+                avatar = driver.find_element(By.CSS_SELECTOR, "button[aria-label*='Account menu']")
+                print("✅ Successfully detected signed-in session (account menu found)!")
                 signed_in = True
             except:
                 try:
-                    # Method 3: Check for "Sign in" text (indicates NOT signed in)
-                    page_text = driver.page_source.lower()
-                    if "sign in" in page_text and "sign out" not in page_text:
-                        print("❌ Session appears to be expired - 'Sign in' text detected")
+                    # Method 3: Look for profile button
+                    profile = driver.find_element(By.CSS_SELECTOR, "button[aria-label*='profile']")
+                    print("✅ Successfully detected signed-in session (profile button found)!")
+                    signed_in = True
+                except:
+                    # Method 4: Check page source for sign-in indicators
+                    page_source = driver.page_source.lower()
+                    if '"signedIn":true' in page_source or 'avatar-btn' in page_source:
+                        print("✅ Successfully detected signed-in session (page source analysis)!")
+                        signed_in = True
+                    elif 'sign in' in page_source and 'sign out' not in page_source:
+                        print("❌ Session appears to be expired - 'Sign in' detected without 'Sign out'")
                         return False
                     else:
-                        print("🤔 Unable to determine sign-in status clearly, proceeding...")
-                        signed_in = True
-                except Exception as check_error:
-                    print(f"⚠️ Error checking sign-in status: {check_error}")
-                    print("Proceeding with session refresh anyway...")
-                    signed_in = True
+                        print("🤔 Unable to determine sign-in status clearly, proceeding with refresh...")
+                        signed_in = True  # Assume success and continue
         
         if not signed_in:
             print("❌ Could not verify signed-in session")
@@ -156,7 +166,7 @@ def extend_google_youtube_session():
 def load_cookies_from_file(driver, cookies_file):
     """
     Load cookies from Netscape format file into the browser.
-    Properly handles domain filtering and navigation.
+    Uses domain-specific navigation and batched injection to avoid timeouts.
     
     Args:
         driver: Selenium WebDriver instance
@@ -169,8 +179,14 @@ def load_cookies_from_file(driver, cookies_file):
         with open(cookies_file, 'r') as f:
             lines = f.readlines()
         
-        # Group cookies by domain for proper loading
-        cookies_by_domain = {}
+        # Group cookies by specific domains for targeted injection
+        domain_buckets = {
+            'accounts.google.com': [],
+            'google.com': [],
+            'youtube.com': [],
+            'googlevideo.com': [],
+            'other_google': []
+        }
         
         for line in lines:
             line = line.strip()
@@ -182,7 +198,7 @@ def load_cookies_from_file(driver, cookies_file):
                 domain = parts[0].lstrip('.')
                 path = parts[2]
                 secure = parts[3] == 'TRUE'
-                expiry = int(parts[4]) if parts[4] != '0' else None
+                expiry = int(parts[4]) if parts[4] != '0' and parts[4].isdigit() else None
                 name = parts[5]
                 value = parts[6]
                 
@@ -192,7 +208,7 @@ def load_cookies_from_file(driver, cookies_file):
                     
                     cookie_dict = {
                         'name': name,
-                        'value': value,
+                        'value': str(value),  # Ensure string type
                         'path': path,
                         'secure': secure
                     }
@@ -209,68 +225,67 @@ def load_cookies_from_file(driver, cookies_file):
                     if expiry and expiry > 0:
                         cookie_dict['expiry'] = expiry
                     
-                    # Group by base domain
-                    base_domain = domain.split('.')[-2] + '.' + domain.split('.')[-1] if '.' in domain else domain
-                    if base_domain not in cookies_by_domain:
-                        cookies_by_domain[base_domain] = []
-                    cookies_by_domain[base_domain].append(cookie_dict)
+                    # Sort into appropriate bucket
+                    if 'accounts.google' in domain:
+                        domain_buckets['accounts.google.com'].append(cookie_dict)
+                    elif 'youtube' in domain:
+                        domain_buckets['youtube.com'].append(cookie_dict)
+                    elif 'googlevideo' in domain:
+                        domain_buckets['googlevideo.com'].append(cookie_dict)
+                    elif 'google' in domain:
+                        domain_buckets['google.com'].append(cookie_dict)
+                    else:
+                        domain_buckets['other_google'].append(cookie_dict)
         
         total_cookies_loaded = 0
         
-        # Load cookies for each domain
-        for base_domain, cookies in cookies_by_domain.items():
+        # Process each domain bucket with specific navigation
+        domain_urls = {
+            'accounts.google.com': 'https://accounts.google.com',
+            'google.com': 'https://google.com',
+            'youtube.com': 'https://youtube.com',
+            'googlevideo.com': 'https://youtube.com',  # Use YouTube for googlevideo cookies
+            'other_google': 'https://google.com'
+        }
+        
+        for bucket_name, cookies in domain_buckets.items():
+            if not cookies:
+                continue
+                
             try:
-                # Navigate to the domain first
-                if 'google' in base_domain:
-                    target_url = "https://google.com"  # Use apex domain for better compatibility
-                elif 'youtube' in base_domain:
-                    target_url = "https://youtube.com"  # Use apex domain
-                else:
-                    target_url = f"https://{base_domain}"
+                target_url = domain_urls[bucket_name]
+                print(f"🌐 Navigating to {target_url} for {len(cookies)} cookies...")
                 
-                print(f"Navigating to {target_url} to load {len(cookies)} cookies")
                 driver.get(target_url)
-                time.sleep(2)  # Wait for page load
+                time.sleep(3)  # Wait for page load
                 
-                # Add cookies for this domain
-                domain_cookies_loaded = 0
-                for cookie in cookies:
-                    try:
-                        # Clean cookie object - remove any extra fields Selenium doesn't like
-                        clean_cookie = {
-                            'name': cookie['name'],
-                            'value': str(cookie['value']),  # Ensure string type
-                            'path': cookie['path'],
-                            'secure': cookie['secure']
-                        }
-                        
-                        # Handle __Host- prefix cookies (must NOT have domain attribute)
-                        if cookie['name'].startswith('__Host-'):
-                            print(f"Handling __Host- cookie: {cookie['name']} (no domain)")
-                            # __Host- cookies must not have domain attribute
-                        else:
-                            # Regular cookies can have domain
-                            clean_cookie['domain'] = cookie['domain']
-                        
-                        # Only add expiry if it's valid and positive
-                        if 'expiry' in cookie and cookie['expiry'] and cookie['expiry'] > 0:
-                            clean_cookie['expiry'] = cookie['expiry']
-                        
-                        driver.add_cookie(clean_cookie)
-                        domain_cookies_loaded += 1
-                        
-                    except Exception as cookie_error:
-                        print(f"Warning: Could not add cookie {cookie['name']} for {base_domain}: {cookie_error}")
-                        continue
+                # Inject cookies in smaller batches to avoid timeouts
+                batch_size = 10
+                cookies_injected = 0
                 
-                print(f"Loaded {domain_cookies_loaded} cookies for {base_domain}")
-                total_cookies_loaded += domain_cookies_loaded
+                for i in range(0, len(cookies), batch_size):
+                    batch = cookies[i:i + batch_size]
+                    
+                    for cookie in batch:
+                        try:
+                            driver.add_cookie(cookie)
+                            cookies_injected += 1
+                        except Exception:
+                            # Silently skip failed cookies to avoid log flooding
+                            pass
+                    
+                    # Small delay between batches
+                    if i + batch_size < len(cookies):
+                        time.sleep(0.5)
+                
+                print(f"✅ Injected {cookies_injected}/{len(cookies)} cookies for {bucket_name}")
+                total_cookies_loaded += cookies_injected
                 
             except Exception as domain_error:
-                print(f"Warning: Could not load cookies for domain {base_domain}: {domain_error}")
+                print(f"⚠️ Could not process {bucket_name}: {domain_error}")
                 continue
         
-        print(f"Total cookies loaded: {total_cookies_loaded}")
+        print(f"🎯 Total cookies successfully loaded: {total_cookies_loaded}")
         return total_cookies_loaded > 0
         
     except Exception as e:
