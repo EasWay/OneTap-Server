@@ -387,9 +387,15 @@ def download_video():
                 "youtube": {
                     "remote_components": ["ejs:github"],
                     "player_client": ["web"],
-                    "js_engine": "deno"
+                    "js_engine": "deno",
+                    # Additional options to handle bot detection
+                    "skip": ["hls", "dash"],  # Skip adaptive formats that might trigger bot detection
+                    "player_skip": ["configs"]  # Skip some player configs that might cause issues
                 }
             },
+            # Add delays to avoid being flagged as a bot
+            "sleep_interval": 1,
+            "max_sleep_interval": 3,
             # Enable verbose logging to see what's happening
             "verbose": True
         }
@@ -402,31 +408,42 @@ def download_video():
             if os.path.exists(GOOGLE_COOKIES_FILE):
                 logger.info("🍪 Using Google cookies for YouTube")
                 
-                # Check if chrome_version.json exists - if not, extend session first
-                chrome_version_file = os.path.join(os.getcwd(), "chrome_version.json")
-                if not os.path.exists(chrome_version_file):
-                    logger.info("🔄 Chrome version file missing - extending session first...")
-                    try:
-                        from cookie_manager import extend_google_youtube_session
-                        success = extend_google_youtube_session()
-                        if not success:
-                            logger.error("❌ Session extension failed")
-                            return jsonify({"error": "Session extension failed. Please try /extend_youtube_session first."}), 400
-                    except Exception as e:
-                        logger.error(f"❌ Session extension error: {e}")
-                        return jsonify({"error": f"Session extension failed: {str(e)}"}), 400
+                # Always extend session before download to ensure fresh cookies
+                logger.info("🔄 Refreshing session before download...")
+                try:
+                    from cookie_manager import extend_google_youtube_session
+                    success = extend_google_youtube_session()
+                    if not success:
+                        logger.error("❌ Session extension failed")
+                        return jsonify({"error": "Session extension failed. Please upload fresh cookies via /update_google_cookies"}), 400
+                    logger.info("✅ Session refreshed successfully")
+                except Exception as e:
+                    logger.error(f"❌ Session extension error: {e}")
+                    return jsonify({"error": f"Session extension failed: {str(e)}"}), 400
                 
                 ydl_opts["cookiefile"] = GOOGLE_COOKIES_FILE
                 
                 # Use the EXACT same User-Agent as Selenium to avoid cookie rejection
+                chrome_version_file = os.path.join(os.getcwd(), "chrome_version.json")
                 if os.path.exists(chrome_version_file):
                     with open(chrome_version_file, 'r') as f:
                         version_info = json.load(f)
-                    ydl_opts["user_agent"] = version_info["user_agent"]
+                    exact_ua = version_info["user_agent"]
+                    
+                    # Set User-Agent in BOTH places to prevent mismatch
+                    ydl_opts["user_agent"] = exact_ua
+                    ydl_opts["http_headers"] = {
+                        "User-Agent": exact_ua,
+                        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                        "Accept-Language": "en-us,en;q=0.5",
+                        "Sec-Fetch-Mode": "navigate"
+                    }
+                    
                     logger.info(f"🔧 Using exact User-Agent from cookie generation: {version_info['chrome_version']}")
+                    logger.info(f"🔒 Synchronized User-Agent in both params and headers: {exact_ua}")
                 else:
-                    logger.error("❌ Chrome version file not found - session extension required first")
-                    return jsonify({"error": "Session extension required. Please call /extend_youtube_session first."}), 400
+                    logger.error("❌ Chrome version file not found after session extension")
+                    return jsonify({"error": "Session extension failed to create version file"}), 400
                 
                 # Keep challenge solving enabled for signed-in downloads
                 if "extractor_args" not in ydl_opts:

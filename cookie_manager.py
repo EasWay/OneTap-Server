@@ -134,10 +134,29 @@ def extend_google_youtube_session():
         
         print(f"🔑 Found {len(found_auth_cookies)} auth cookies: {found_auth_cookies}")
         
-        if len(found_auth_cookies) >= 2:
+        if len(found_auth_cookies) >= 3:
             print("✅ Session verification successful")
         else:
-            print("⚠️ Limited auth cookies found, but proceeding...")
+            print("⚠️ Limited auth cookies found - attempting to refresh session...")
+            
+            # Try to refresh by visiting YouTube briefly
+            try:
+                print("🔄 Attempting session refresh via YouTube...")
+                driver.get("https://www.youtube.com/")
+                time.sleep(2)  # Wait for page load
+                
+                # Check cookies again
+                refreshed_cookies = driver.get_cookies()
+                refreshed_auth_cookies = [cookie['name'] for cookie in refreshed_cookies if cookie['name'] in auth_cookies]
+                print(f"🔄 After refresh: {len(refreshed_auth_cookies)} auth cookies: {refreshed_auth_cookies}")
+                
+                if len(refreshed_auth_cookies) < 3:
+                    print("❌ Session refresh failed - cookies may be expired")
+                    return False
+                    
+            except Exception as refresh_error:
+                print(f"⚠️ Session refresh attempt failed: {refresh_error}")
+                # Continue anyway - might still work
         
         # Extract updated cookies directly (no additional navigation needed)
         print("📦 Extracting session cookies...")
@@ -170,7 +189,12 @@ def extend_google_youtube_session():
                 with open(os.path.join(os.getcwd(), "chrome_version.json"), "w") as f:
                     json.dump(version_info, f)
                 
+                # Also save just the UA to a simple text file for backup
+                with open(os.path.join(os.getcwd(), "last_ua.txt"), "w") as f:
+                    f.write(REAL_USER_AGENT)
+                
                 print(f"💾 Saved Chrome version info: {chrome_version_full}")
+                print(f"🔒 Saved exact User-Agent: {REAL_USER_AGENT}")
         except Exception as e:
             print(f"⚠️ Could not save Chrome version info: {e}")
         
