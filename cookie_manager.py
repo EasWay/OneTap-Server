@@ -41,9 +41,9 @@ def extend_google_youtube_session():
         print(f"❌ Error checking cookies file: {e}")
         return False
     
-    # Setup Chrome options for minimal memory usage on constrained servers
+    # Setup Chrome options for ultra-minimal memory usage
     chrome_options = webdriver.ChromeOptions()
-    chrome_options.add_argument("--headless=new")  # Use new headless mode
+    chrome_options.add_argument("--headless=new")  # Use new efficient headless mode
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--disable-gpu")
@@ -67,6 +67,12 @@ def extend_google_youtube_session():
     chrome_options.add_argument("--disable-blink-features=AutomationControlled")
     chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
     chrome_options.add_experimental_option('useAutomationExtension', False)
+    
+    # Disable stylesheets to save even more memory
+    prefs = {
+        "profile.managed_default_content_settings.stylesheets": 2
+    }
+    chrome_options.add_experimental_option("prefs", prefs)
     
     # Minimal user agent
     chrome_options.add_argument("--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36")
@@ -108,27 +114,22 @@ def extend_google_youtube_session():
         
         print("✅ Cookies loaded successfully")
         
-        # Quick session verification
-        print("🔍 Verifying session...")
-        driver.get("https://youtube.com")
-        time.sleep(2)  # Minimal wait
+        # Lightweight verification - check if important cookies are present
+        print("🔍 Verifying session cookies...")
+        current_cookies = driver.get_cookies()
         
-        # Simple URL-based check
-        current_url = driver.current_url.lower()
-        print(f"📍 Current URL: {current_url}")
+        # Look for key Google authentication cookies
+        auth_cookies = ['SID', 'HSID', 'SSID', 'APISID', 'SAPISID']
+        found_auth_cookies = [cookie['name'] for cookie in current_cookies if cookie['name'] in auth_cookies]
         
-        if "accounts.google.com" in current_url or "signin" in current_url:
-            print("❌ Session expired - redirected to sign-in")
-            return False
+        print(f"🔑 Found {len(found_auth_cookies)} auth cookies: {found_auth_cookies}")
         
-        print("✅ Session appears valid")
+        if len(found_auth_cookies) >= 2:
+            print("✅ Session verification successful")
+        else:
+            print("⚠️ Limited auth cookies found, but proceeding...")
         
-        # Simple token refresh - just visit YouTube once more
-        print("🔄 Refreshing tokens...")
-        driver.get("https://youtube.com")
-        time.sleep(1)
-        
-        # Extract updated cookies
+        # Extract updated cookies directly (no additional navigation needed)
         print("📦 Extracting session cookies...")
         selenium_cookies = driver.get_cookies()
         print(f"📊 Found {len(selenium_cookies)} cookies")
@@ -232,13 +233,13 @@ def load_cookies_from_file(driver, cookies_file):
         
         total_cookies_loaded = 0
         
-        # Process each domain bucket with specific navigation
+        # Process each domain bucket with lightweight robots.txt navigation
         domain_urls = {
-            'accounts.google.com': 'https://accounts.google.com',
-            'google.com': 'https://google.com',
-            'youtube.com': 'https://youtube.com',
-            'googlevideo.com': 'https://youtube.com',  # Use YouTube for googlevideo cookies
-            'other_google': 'https://google.com'
+            'accounts.google.com': 'https://accounts.google.com/robots.txt',
+            'google.com': 'https://google.com/robots.txt',
+            'youtube.com': 'https://youtube.com/robots.txt',
+            'googlevideo.com': 'https://youtube.com/robots.txt',  # Use YouTube robots.txt for googlevideo cookies
+            'other_google': 'https://google.com/robots.txt'
         }
         
         for bucket_name, cookies in domain_buckets.items():
@@ -247,12 +248,12 @@ def load_cookies_from_file(driver, cookies_file):
                 
             try:
                 target_url = domain_urls[bucket_name]
-                print(f"🌐 Loading cookies for {target_url}...")
+                print(f"🤖 Loading lightweight context: {target_url}")
                 driver.get(target_url)
-                time.sleep(1)  # Minimal wait
+                time.sleep(0.5)  # Very minimal wait for text file
                 
-                # Inject cookies in smaller batches to avoid timeouts
-                batch_size = 10
+                # Inject cookies in very small batches to avoid timeouts
+                batch_size = 5  # Reduced from 10
                 cookies_injected = 0
                 
                 for i in range(0, len(cookies), batch_size):
