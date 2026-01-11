@@ -49,12 +49,15 @@ def extend_google_youtube_session():
     chrome_options.add_argument("--disable-blink-features=AutomationControlled")
     chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("--remote-debugging-port=9222")
+    chrome_options.add_argument("--memory-pressure-off")
+    chrome_options.add_argument("--max_old_space_size=4096")
     chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
     chrome_options.add_experimental_option('useAutomationExtension', False)
     
     # Add user agent to appear more legitimate
     chrome_options.add_argument("--user-agent=Mozilla/5.0 (Linux; x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
     
+    driver = None
     try:
         # Use webdriver-manager for automatic ChromeDriver management
         service = Service(ChromeDriverManager().install())
@@ -62,14 +65,12 @@ def extend_google_youtube_session():
         driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
     except Exception as e:
         print(f"Error initializing WebDriver: {e}")
+        if driver:
+            driver.quit()
         return False
 
     try:
-        # Navigate to YouTube first
-        driver.get("https://www.youtube.com")
-        time.sleep(2)
-        
-        # Load existing cookies from file
+        # Load existing cookies from file (this will handle navigation)
         print("Loading existing Google cookies...")
         cookies_loaded = load_cookies_from_file(driver, GOOGLE_COOKIES_FILE)
         
@@ -77,8 +78,9 @@ def extend_google_youtube_session():
             print("Failed to load existing cookies")
             return False
         
-        # Refresh the page to apply cookies
-        driver.refresh()
+        # Navigate to YouTube to verify session
+        print("Verifying session on YouTube...")
+        driver.get("https://www.youtube.com")
         time.sleep(3)
         
         # Check if we're signed in by looking for user avatar or sign-in button
@@ -126,12 +128,17 @@ def extend_google_youtube_session():
         return False
     
     finally:
-        driver.quit()
+        if driver:
+            try:
+                driver.quit()
+            except Exception as quit_error:
+                print(f"Warning: Error closing driver: {quit_error}")
         print("--- Session extension finished ---")
 
 def load_cookies_from_file(driver, cookies_file):
     """
     Load cookies from Netscape format file into the browser.
+    Properly handles domain filtering and navigation.
     
     Args:
         driver: Selenium WebDriver instance
@@ -144,7 +151,9 @@ def load_cookies_from_file(driver, cookies_file):
         with open(cookies_file, 'r') as f:
             lines = f.readlines()
         
-        cookies_loaded = 0
+        # Group cookies by domain for proper loading
+        cookies_by_domain = {}
+        
         for line in lines:
             line = line.strip()
             if line.startswith('#') or not line:
@@ -152,32 +161,84 @@ def load_cookies_from_file(driver, cookies_file):
             
             parts = line.split('\t')
             if len(parts) >= 7:
-                domain = parts[0]
+                domain = parts[0].lstrip('.')
                 path = parts[2]
                 secure = parts[3] == 'TRUE'
                 expiry = int(parts[4]) if parts[4] != '0' else None
                 name = parts[5]
                 value = parts[6]
                 
-                cookie_dict = {
-                    'name': name,
-                    'value': value,
-                    'domain': domain,
-                    'path': path,
-                    'secure': secure
-                }
-                
-                if expiry:
-                    cookie_dict['expiry'] = expiry
-                
-                try:
-                    driver.add_cookie(cookie_dict)
-                    cookies_loaded += 1
-                except Exception as e:
-                    print(f"Warning: Could not add cookie {name}: {e}")
+                # Only process Google/YouTube related domains
+                google_domains = ['google.com', 'youtube.com', 'googlevideo.com', 'gstatic.com', 'googleapis.com']
+                if any(gd in domain for gd in google_domains):
+                    
+                    cookie_dict = {
+                        'name': name,
+                        'value': value,
+                        'domain': domain if domain.startswith('.') else f'.{domain}',
+                        'path': path,
+                        'secure': secure
+                    }
+                    
+                    if expiry and expiry > 0:
+                        cookie_dict['expiry'] = expiry
+                    
+                    # Group by base domain
+                    base_domain = domain.split('.')[-2] + '.' + domain.split('.')[-1] if '.' in domain else domain
+                    if base_domain not in cookies_by_domain:
+                        cookies_by_domain[base_domain] = []
+                    cookies_by_domain[base_domain].append(cookie_dict)
         
-        print(f"Loaded {cookies_loaded} cookies from {cookies_file}")
-        return cookies_loaded > 0
+        total_cookies_loaded = 0
+        
+        # Load cookies for each domain
+        for base_domain, cookies in cookies_by_domain.items():
+            try:
+                # Navigate to the domain first
+                if 'google' in base_domain:
+                    target_url = "https://www.google.com"
+                elif 'youtube' in base_domain:
+                    target_url = "https://www.youtube.com"
+                else:
+                    target_url = f"https://{base_domain}"
+                
+                print(f"Navigating to {target_url} to load {len(cookies)} cookies")
+                driver.get(target_url)
+                time.sleep(2)  # Wait for page load
+                
+                # Add cookies for this domain
+                domain_cookies_loaded = 0
+                for cookie in cookies:
+                    try:
+                        # Clean cookie object - remove any extra fields Selenium doesn't like
+                        clean_cookie = {
+                            'name': cookie['name'],
+                            'value': cookie['value'],
+                            'domain': cookie['domain'],
+                            'path': cookie['path'],
+                            'secure': cookie['secure']
+                        }
+                        
+                        # Only add expiry if it's valid
+                        if 'expiry' in cookie and cookie['expiry']:
+                            clean_cookie['expiry'] = cookie['expiry']
+                        
+                        driver.add_cookie(clean_cookie)
+                        domain_cookies_loaded += 1
+                        
+                    except Exception as cookie_error:
+                        print(f"Warning: Could not add cookie {cookie['name']} for {base_domain}: {cookie_error}")
+                        continue
+                
+                print(f"Loaded {domain_cookies_loaded} cookies for {base_domain}")
+                total_cookies_loaded += domain_cookies_loaded
+                
+            except Exception as domain_error:
+                print(f"Warning: Could not load cookies for domain {base_domain}: {domain_error}")
+                continue
+        
+        print(f"Total cookies loaded: {total_cookies_loaded}")
+        return total_cookies_loaded > 0
         
     except Exception as e:
         print(f"Error loading cookies from file: {e}")
@@ -236,14 +297,19 @@ def generate_new_instagram_cookies(username, password):
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("--remote-debugging-port=9222")
+    chrome_options.add_argument("--memory-pressure-off")
+    chrome_options.add_argument("--max_old_space_size=4096")
     
     # Initialize the WebDriver using webdriver-manager
+    driver = None
     try:
         service = Service(ChromeDriverManager().install())
         driver = webdriver.Chrome(service=service, options=chrome_options)
     except Exception as e:
         print(f"Error initializing WebDriver: {e}")
         print("Please ensure Chrome is installed and accessible.")
+        if driver:
+            driver.quit()
         return False
 
     try:
@@ -310,7 +376,11 @@ def generate_new_instagram_cookies(username, password):
         return False
     
     finally:
-        driver.quit() # Always close the browser
+        if driver:
+            try:
+                driver.quit()
+            except Exception as quit_error:
+                print(f"Warning: Error closing driver: {quit_error}")
         print("--- Cookie generation finished ---")
 
 if __name__ == "__main__":
