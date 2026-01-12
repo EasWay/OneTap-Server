@@ -527,16 +527,46 @@ class YouTubeAuthenticator:
             return True
     
     def extract_youtube_cookies_for_ytdlp(self):
-        """Extract cookies from Chrome session for yt-dlp with detailed logging"""
+        """Extract cookies from Chrome session for yt-dlp with timeout handling"""
         logger.info("🍪 Extracting cookies from Chrome session for yt-dlp...")
         
         try:
             if not self.driver:
                 logger.error("❌ No Chrome driver available for cookie extraction")
                 return None
+            
+            # Set a shorter timeout for cookie extraction
+            logger.debug("⏱️ Setting shorter timeout for cookie extraction...")
+            original_timeout = self.driver.implicitly_wait(0)
+            
+            # Try to get cookies with timeout handling
+            logger.info("📊 Attempting to retrieve cookies from Chrome session...")
+            
+            try:
+                # Use a more direct approach with shorter timeout
+                import signal
                 
-            cookies = self.driver.get_cookies()
-            logger.info(f"📊 Retrieved {len(cookies)} total cookies from Chrome session")
+                def timeout_handler(signum, frame):
+                    raise TimeoutError("Cookie extraction timed out")
+                
+                # Set alarm for 30 seconds (much shorter than the 6+ minutes we saw)
+                if hasattr(signal, 'SIGALRM'):  # Unix systems only
+                    signal.signal(signal.SIGALRM, timeout_handler)
+                    signal.alarm(30)
+                
+                cookies = self.driver.get_cookies()
+                
+                if hasattr(signal, 'SIGALRM'):
+                    signal.alarm(0)  # Cancel alarm
+                
+                logger.info(f"📊 Retrieved {len(cookies)} total cookies from Chrome session")
+                
+            except (TimeoutError, Exception) as e:
+                logger.warning(f"⚠️ Direct cookie extraction failed: {str(e)}")
+                logger.info("🔄 Trying alternative cookie extraction method...")
+                
+                # Alternative: Extract cookies from profile files directly
+                return self.extract_cookies_from_profile_files()
             
             # Convert to Netscape format for yt-dlp
             cookie_lines = ["# Netscape HTTP Cookie File"]
@@ -633,15 +663,141 @@ class YouTubeAuthenticator:
         except Exception as e:
             logger.error(f"❌ Error extracting cookies: {str(e)}")
             logger.exception("Full cookie extraction error traceback:")
+            
+            # Fallback to profile file extraction
+            logger.info("🔄 Attempting fallback cookie extraction from profile files...")
+            return self.extract_cookies_from_profile_files()
+    
+    def extract_cookies_from_profile_files(self):
+        """Fallback method: Extract cookies directly from Chrome profile files"""
+        logger.info("📁 Extracting cookies directly from profile files...")
+        
+        try:
+            if not self.active_profile_dir:
+                logger.error("❌ No active profile directory available")
+                return None
+            
+            cookies_db_path = os.path.join(self.active_profile_dir, "Default", "Network", "Cookies")
+            
+            if not os.path.exists(cookies_db_path):
+                logger.warning(f"⚠️ Cookies database not found: {cookies_db_path}")
+                return None
+            
+            logger.info(f"📂 Reading cookies from: {cookies_db_path}")
+            
+            import sqlite3
+            import tempfile
+            
+            # Copy cookies database to avoid locking issues
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.db') as temp_db:
+                shutil.copy2(cookies_db_path, temp_db.name)
+                temp_db_path = temp_db.name
+            
+            try:
+                conn = sqlite3.connect(temp_db_path)
+                cursor = conn.cursor()
+                
+                # Extract YouTube/Google cookies
+                cursor.execute("""
+                    SELECT host_key, name, value, path, expires_utc, is_secure, is_httponly
+                    FROM cookies 
+                    WHERE host_key LIKE '%youtube%' OR host_key LIKE '%google%' OR host_key LIKE '%googlevideo%'
+                    ORDER BY creation_utc DESC
+                """)
+                
+                rows = cursor.fetchall()
+                logger.info(f"📊 Found {len(rows)} cookies in database")
+                
+                if not rows:
+                    logger.warning("⚠️ No YouTube/Google cookies found in database")
+                    return None
+                
+                # Convert to Netscape cookie format
+                cookie_lines = ["# Netscape HTTP Cookie File"]
+                cookie_lines.append("# Extracted from Chrome profile database")
+                cookie_lines.append(f"# Extracted at: {time.strftime('%Y-%m-%d %H:%M:%S')}")
+                
+                essential_cookies = 0
+                
+                for row in rows:
+                    host_key, name, value, path, expires_utc, is_secure, is_httponly = row
+                    
+                    # Skip cookies with empty values
+                    if not value or not name:
+                        continue
+                    
+                    # Convert Chrome timestamp to Unix timestamp
+                    if expires_utc:
+                        expires = int(expires_utc / 1000000 - 11644473600)
+                    else:
+                        expires = 0
+                    
+                    # Format: domain, domain_specified, path, secure, expires, name, value
+                    cookie_line = f"{host_key}\tTRUE\t{path}\t{'TRUE' if is_secure else 'FALSE'}\t{expires}\t{name}\t{value}"
+                    cookie_lines.append(cookie_line)
+                    
+                    # Count essential cookies
+                    if name in ['SAPISID', 'HSID', 'SSID', 'APISID', 'SID', '__Secure-3PAPISID']:
+                        essential_cookies += 1
+                
+                conn.close()
+                
+                # Save extracted cookies
+                temp_cookies_file = os.path.join(os.getcwd(), "profile_extracted_cookies.txt")
+                with open(temp_cookies_file, 'w', encoding='utf-8') as f:
+                    f.write('\n'.join(cookie_lines))
+                
+                logger.info(f"✅ Extracted {len(cookie_lines)-3} cookies from profile database")
+                logger.info(f"✅ Found {essential_cookies} essential authentication cookies")
+                
+                return temp_cookies_file
+                
+            finally:
+                os.unlink(temp_db_path)
+                
+        except Exception as e:
+            logger.error(f"❌ Profile file cookie extraction failed: {str(e)}")
             return None
     
     def cleanup(self):
-        """Clean up Chrome driver"""
+        """Clean up Chrome driver with force termination if needed"""
+        logger.info("🧹 Cleaning up Chrome driver...")
+        
         if self.driver:
             try:
+                # Try graceful shutdown first
+                logger.debug("Attempting graceful Chrome shutdown...")
                 self.driver.quit()
-            except:
-                pass
+                logger.info("✅ Chrome driver closed gracefully")
+            except Exception as e:
+                logger.warning(f"⚠️ Graceful shutdown failed: {e}")
+                
+                # Force termination if graceful shutdown fails
+                try:
+                    logger.info("🔨 Force terminating Chrome process...")
+                    import psutil
+                    import os
+                    
+                    # Find and kill Chrome processes
+                    for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
+                        try:
+                            if proc.info['name'] and 'chrome' in proc.info['name'].lower():
+                                if proc.info['cmdline'] and any('user-data-dir' in arg for arg in proc.info['cmdline']):
+                                    logger.debug(f"Terminating Chrome process: {proc.info['pid']}")
+                                    proc.terminate()
+                        except (psutil.NoSuchProcess, psutil.AccessDenied):
+                            pass
+                    
+                    logger.info("✅ Chrome processes terminated")
+                    
+                except ImportError:
+                    logger.warning("⚠️ psutil not available for force termination")
+                except Exception as e:
+                    logger.error(f"❌ Force termination failed: {e}")
+        
+        self.driver = None
+        self.cookies_loaded = False
+        self.profile_loaded = False
 
 def get_deno_path():
     """Locate Deno for YouTube challenges"""

@@ -7,3 +7,4 @@ ffmpeg-python
 cryptography
 selenium
 webdriver-manager
+psutil
