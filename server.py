@@ -42,6 +42,11 @@ GOOGLE_COOKIES_FILE = os.path.join(os.getcwd(), "google_cookies.txt")
 SOCIAL_COOKIES_FILE = os.path.join(os.getcwd(), "social_cookies.txt")
 RENDER_COOKIES_FILE = os.path.join(os.getcwd(), "render_cookies.txt")
 
+# Profile directories for complete Chrome profiles
+CHROME_PROFILE_DIR = os.path.join(os.getcwd(), "chrome_profile")
+YOUTUBE_PROFILE_DIR = os.path.join(os.getcwd(), "youtube_profile")
+AUTHENTICATED_PROFILE_DIR = os.path.join(os.getcwd(), "authenticated_youtube_session")
+
 # Detect environment
 IS_RENDER = os.environ.get('RENDER') is not None
 
@@ -49,16 +54,63 @@ IS_RENDER = os.environ.get('RENDER') is not None
 EXACT_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
 
 class YouTubeAuthenticator:
-    """Handle YouTube authentication using Chrome/Selenium"""
+    """Handle YouTube authentication using Chrome/Selenium with full profile support"""
     
     def __init__(self):
         self.driver = None
         self.cookies_loaded = False
+        self.profile_loaded = False
+        self.active_profile_dir = None
+        
+    def find_authenticated_profile(self):
+        """Find the best authenticated Chrome profile to use"""
+        profile_candidates = [
+            AUTHENTICATED_PROFILE_DIR,
+            YOUTUBE_PROFILE_DIR,
+            CHROME_PROFILE_DIR,
+            "authenticated_youtube_session_complete_backup",
+            "tldv_profile"
+        ]
+        
+        for profile_dir in profile_candidates:
+            if os.path.exists(profile_dir):
+                # Check if profile has authentication data
+                default_dir = os.path.join(profile_dir, "Default")
+                if os.path.exists(default_dir):
+                    # Look for key authentication files
+                    auth_files = [
+                        os.path.join(default_dir, "Login Data"),
+                        os.path.join(default_dir, "Preferences"),
+                        os.path.join(default_dir, "Network", "Cookies")
+                    ]
+                    
+                    if any(os.path.exists(f) for f in auth_files):
+                        logger.info(f"🔍 Found authenticated profile: {profile_dir}")
+                        return profile_dir
+        
+        logger.warning("⚠️ No authenticated Chrome profile found")
+        return None
         
     def setup_chrome_driver(self):
-        """Setup Chrome driver for YouTube authentication"""
+        """Setup Chrome driver for YouTube authentication with profile support"""
         try:
             chrome_options = Options()
+            
+            # Find and use authenticated profile
+            self.active_profile_dir = self.find_authenticated_profile()
+            
+            if self.active_profile_dir:
+                # Use the authenticated profile
+                chrome_options.add_argument(f"--user-data-dir={self.active_profile_dir}")
+                chrome_options.add_argument("--profile-directory=Default")
+                logger.info(f"🔐 Using authenticated profile: {self.active_profile_dir}")
+                self.profile_loaded = True
+            else:
+                # Create temporary profile directory
+                temp_profile = os.path.join(os.getcwd(), "temp_chrome_profile")
+                os.makedirs(temp_profile, exist_ok=True)
+                chrome_options.add_argument(f"--user-data-dir={temp_profile}")
+                logger.info("🔐 Using temporary profile (no authenticated profile found)")
             
             # Headless mode for server environment with memory optimizations
             chrome_options.add_argument("--headless=new")
@@ -76,11 +128,8 @@ class YouTubeAuthenticator:
             chrome_options.add_argument("--disable-extensions")
             chrome_options.add_argument("--disable-plugins")
             chrome_options.add_argument("--disable-images")  # Save memory
-            chrome_options.add_argument("--disable-javascript")  # Save memory for auth only
             chrome_options.add_argument("--max_old_space_size=512")  # Limit memory
             chrome_options.add_argument("--aggressive-cache-discard")
-            chrome_options.add_argument("--memory-pressure-off")
-            chrome_options.add_argument("--max_old_space_size=512")
             
             # Anti-detection options
             chrome_options.add_argument("--disable-blink-features=AutomationControlled")
@@ -88,6 +137,11 @@ class YouTubeAuthenticator:
             chrome_options.add_experimental_option('useAutomationExtension', False)
             chrome_options.add_argument("--window-size=1920,1080")
             chrome_options.add_argument(f"--user-agent={EXACT_UA}")
+            
+            # Preserve session data
+            chrome_options.add_argument("--disable-web-security")
+            chrome_options.add_argument("--allow-running-insecure-content")
+            chrome_options.add_argument("--disable-features=VizDisplayCompositor")
             
             # Try to use the installed Chrome
             chrome_paths = [
@@ -132,9 +186,25 @@ class YouTubeAuthenticator:
             return False
     
     def load_youtube_cookies(self):
-        """Load YouTube cookies into Chrome"""
+        """Load YouTube cookies into Chrome (fallback if profile doesn't have auth)"""
         try:
-            # Find the best cookie source
+            # If we're using an authenticated profile, check if it already has auth
+            if self.profile_loaded and self.active_profile_dir:
+                # Navigate to YouTube to test existing authentication
+                self.driver.get("https://www.youtube.com")
+                time.sleep(3)
+                
+                # Quick check for existing authentication
+                try:
+                    auth_elements = self.driver.find_elements(By.CSS_SELECTOR, "ytd-topbar-menu-button-renderer")
+                    if auth_elements:
+                        logger.info("✅ Profile already authenticated - using existing session")
+                        self.cookies_loaded = True
+                        return True
+                except:
+                    pass
+            
+            # Fallback to cookie loading if profile auth failed
             cookie_sources = []
             
             if os.path.exists(GOOGLE_COOKIES_FILE):
@@ -143,7 +213,7 @@ class YouTubeAuthenticator:
                 cookie_sources.append(RENDER_COOKIES_FILE)
             
             if not cookie_sources:
-                logger.warning("⚠️ No YouTube cookies found")
+                logger.warning("⚠️ No YouTube cookies found and profile not authenticated")
                 return False
             
             # Navigate to YouTube first
@@ -254,6 +324,8 @@ class YouTubeAuthenticator:
             
             # Convert to Netscape format for yt-dlp
             cookie_lines = ["# Netscape HTTP Cookie File"]
+            essential_cookies = 0
+            
             for cookie in cookies:
                 domain = cookie.get('domain', '')
                 name = cookie.get('name', '')
@@ -262,9 +334,18 @@ class YouTubeAuthenticator:
                 secure = cookie.get('secure', False)
                 expires = cookie.get('expiry', 0)
                 
-                if 'youtube' in domain or 'google' in domain:
+                if any(keyword in domain.lower() for keyword in ['youtube', 'google', 'googlevideo']):
                     cookie_line = f"{domain}\tTRUE\t{path}\t{'TRUE' if secure else 'FALSE'}\t{expires}\t{name}\t{value}"
                     cookie_lines.append(cookie_line)
+                    
+                    # Count essential cookies for authentication
+                    if name in ['SAPISID', 'HSID', 'SSID', 'APISID', 'SID', '__Secure-3PAPISID']:
+                        essential_cookies += 1
+            
+            if essential_cookies < 2:
+                logger.warning(f"⚠️ Only {essential_cookies} essential cookies found - authentication may be weak")
+            else:
+                logger.info(f"✅ Found {essential_cookies} essential authentication cookies")
             
             # Save temporary cookies for yt-dlp
             temp_cookies_file = os.path.join(os.getcwd(), "temp_youtube_cookies.txt")
@@ -323,8 +404,8 @@ def detect_platform(url):
     else:
         return "generic"
 
-def get_platform_config(platform, youtube_cookies_file=None):
-    """Get platform-specific yt-dlp configuration"""
+def get_platform_config(platform, youtube_cookies_file=None, chrome_profile_dir=None):
+    """Get platform-specific yt-dlp configuration with Chrome profile support"""
     base_config = {
         "user_agent": EXACT_UA,
         "quiet": False,
@@ -344,9 +425,25 @@ def get_platform_config(platform, youtube_cookies_file=None):
             "format": "bestvideo[vcodec^=avc1]+bestaudio[ext=m4a]/best[ext=mp4]/best",
             "extractor_args": {
                 "youtube": {
-                    "player_client": ["ios", "web"]
+                    "player_client": ["ios", "web", "android"],
+                    "skip": ["hls", "dash"],
+                    "innertube_host": "www.youtube.com",
+                    "innertube_key": None,
+                    "comment_sort": "top"
                 }
-            }
+            },
+            # Additional anti-bot measures
+            "sleep_interval": 1,
+            "max_sleep_interval": 5,
+            "sleep_interval_requests": 1,
+            "sleep_interval_subtitles": 1,
+            # Retry configuration
+            "retries": 3,
+            "fragment_retries": 3,
+            "extractor_retries": 3,
+            # Network configuration
+            "socket_timeout": 30,
+            "http_chunk_size": 10485760,
         }
         
         # Add Deno support if available
@@ -356,8 +453,23 @@ def get_platform_config(platform, youtube_cookies_file=None):
                 "deno": {"executable": deno_exe}
             }
         
-        # Use Chrome-extracted cookies if available, otherwise fallback to file cookies
-        if youtube_cookies_file and os.path.exists(youtube_cookies_file):
+        # Priority order for authentication:
+        # 1. Chrome profile directory (full session)
+        # 2. Chrome-extracted cookies 
+        # 3. File-based cookies
+        # 4. No authentication
+        
+        if chrome_profile_dir and os.path.exists(chrome_profile_dir):
+            # Use Chrome profile directory for full session authentication
+            logger.info(f"🔐 Using Chrome profile directory: {chrome_profile_dir}")
+            # Note: yt-dlp doesn't directly support Chrome profiles, but we extract cookies from them
+            
+        # Check for extracted cookies from profile
+        profile_cookies_file = os.path.join(os.getcwd(), "profile_extracted_cookies.txt")
+        if os.path.exists(profile_cookies_file):
+            config["cookiefile"] = profile_cookies_file
+            logger.info("🍪 Using profile-extracted cookies for YouTube")
+        elif youtube_cookies_file and os.path.exists(youtube_cookies_file):
             config["cookiefile"] = youtube_cookies_file
             logger.info("🍪 Using Chrome-extracted cookies for YouTube")
         elif os.path.exists(GOOGLE_COOKIES_FILE):
@@ -366,6 +478,11 @@ def get_platform_config(platform, youtube_cookies_file=None):
         elif os.path.exists(RENDER_COOKIES_FILE):
             config["cookiefile"] = RENDER_COOKIES_FILE
             logger.info("🍪 Using render cookies for YouTube")
+        else:
+            # If no cookies, try different strategies
+            logger.warning("⚠️ No cookies available for YouTube - using fallback strategies")
+            config["extractor_args"]["youtube"]["player_client"] = ["ios", "android", "web"]
+            config["extractor_args"]["youtube"]["skip"] = ["hls"]
             
     elif platform == "tiktok":
         config = {
@@ -468,48 +585,61 @@ def download_video():
         platform = detect_platform(url)
         logger.info(f"🌍 Detected platform: {platform}")
 
-        # For YouTube, use Chrome authentication with timeout
+        # For YouTube, use Chrome authentication with threading timeout
         if platform == "youtube":
             logger.info("🔐 Setting up Chrome authentication for YouTube...")
             youtube_auth = YouTubeAuthenticator()
             
             try:
-                # Set a timeout for the entire Chrome authentication process
-                import signal
+                # Use threading timeout instead of signal (which doesn't work in Flask threads)
+                import threading
+                import queue
                 
-                def timeout_handler(signum, frame):
-                    raise TimeoutError("Chrome authentication timeout")
+                def chrome_auth_worker(result_queue):
+                    try:
+                        if youtube_auth.setup_chrome_driver():
+                            if youtube_auth.load_youtube_cookies():
+                                if youtube_auth.verify_youtube_authentication():
+                                    # Extract cookies for yt-dlp
+                                    cookies_file = youtube_auth.extract_youtube_cookies_for_ytdlp()
+                                    result_queue.put(("success", cookies_file))
+                                    return
+                        result_queue.put(("failed", None))
+                    except Exception as e:
+                        result_queue.put(("error", str(e)))
                 
-                # Set 60 second timeout for Chrome operations
-                signal.signal(signal.SIGALRM, timeout_handler)
-                signal.alarm(60)
+                # Run Chrome authentication in a separate thread with timeout
+                result_queue = queue.Queue()
+                auth_thread = threading.Thread(target=chrome_auth_worker, args=(result_queue,))
+                auth_thread.daemon = True
+                auth_thread.start()
+                auth_thread.join(timeout=45)  # 45 second timeout
                 
-                try:
-                    if youtube_auth.setup_chrome_driver():
-                        if youtube_auth.load_youtube_cookies():
-                            if youtube_auth.verify_youtube_authentication():
-                                # Extract cookies for yt-dlp
-                                youtube_cookies_file = youtube_auth.extract_youtube_cookies_for_ytdlp()
-                                logger.info("✅ YouTube authentication successful")
-                            else:
-                                logger.warning("⚠️ YouTube authentication verification failed - continuing with file cookies")
+                if auth_thread.is_alive():
+                    logger.warning("⚠️ Chrome authentication timed out - continuing with file cookies")
+                else:
+                    try:
+                        status, result = result_queue.get_nowait()
+                        if status == "success" and result:
+                            youtube_cookies_file = result
+                            logger.info("✅ YouTube authentication successful")
                         else:
-                            logger.warning("⚠️ No YouTube cookies loaded - continuing with file cookies")
-                    else:
-                        logger.warning("⚠️ Chrome driver setup failed - continuing with file cookies")
-                finally:
-                    signal.alarm(0)  # Cancel the timeout
-                    
-            except TimeoutError:
-                logger.warning("⚠️ Chrome authentication timed out - continuing with file cookies")
+                            logger.warning(f"⚠️ Chrome authentication {status} - continuing with file cookies")
+                    except queue.Empty:
+                        logger.warning("⚠️ Chrome authentication returned no result - continuing with file cookies")
+                        
             except Exception as chrome_error:
                 logger.warning(f"⚠️ Chrome authentication failed: {str(chrome_error)} - continuing with file cookies")
 
         # Generate unique filename
         uid = str(uuid.uuid4())[:8]
         
-        # Get platform-specific configuration
-        ydl_opts = get_platform_config(platform, youtube_cookies_file)
+        # Get platform-specific configuration with Chrome profile support
+        chrome_profile_dir = None
+        if platform == "youtube" and youtube_auth and youtube_auth.active_profile_dir:
+            chrome_profile_dir = youtube_auth.active_profile_dir
+        
+        ydl_opts = get_platform_config(platform, youtube_cookies_file, chrome_profile_dir)
         ydl_opts["outtmpl"] = os.path.join(DOWNLOAD_DIR, f"{uid}_%(title)s.%(ext)s")
         
         # Execute download
@@ -558,6 +688,8 @@ def download_video():
             "authentication": {
                 "chrome_used": youtube_auth is not None and platform == "youtube",
                 "cookies_extracted": youtube_cookies_file is not None,
+                "profile_used": youtube_auth is not None and youtube_auth.profile_loaded and platform == "youtube",
+                "profile_directory": youtube_auth.active_profile_dir if youtube_auth and youtube_auth.active_profile_dir else None,
                 "platform_optimized": True
             }
         })
@@ -693,6 +825,216 @@ def upload_cookies():
             "message": "Cookies uploaded successfully",
             "cookie_count": cookie_count,
             "file_size": os.path.getsize(RENDER_COOKIES_FILE)
+        })
+        
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/upload_profile", methods=["POST"])
+def upload_profile():
+    """Upload complete Chrome profile as ZIP file"""
+    try:
+        if 'file' not in request.files:
+            return jsonify({"error": "No profile file provided"}), 400
+        
+        file = request.files['file']
+        if file.filename == '':
+            return jsonify({"error": "No file selected"}), 400
+        
+        if not file.filename.lower().endswith('.zip'):
+            return jsonify({"error": "Profile must be a ZIP file"}), 400
+        
+        # Save uploaded ZIP file
+        zip_path = os.path.join(os.getcwd(), "uploaded_profile.zip")
+        file.save(zip_path)
+        
+        # Extract profile to authenticated directory
+        profile_dir = AUTHENTICATED_PROFILE_DIR
+        
+        # Remove existing profile if it exists
+        if os.path.exists(profile_dir):
+            shutil.rmtree(profile_dir)
+        
+        # Extract ZIP file
+        import zipfile
+        with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+            zip_ref.extractall(profile_dir)
+        
+        # Clean up ZIP file
+        os.remove(zip_path)
+        
+        # Verify profile structure
+        default_dir = os.path.join(profile_dir, "Default")
+        if not os.path.exists(default_dir):
+            # If no Default directory, check if files are in root
+            profile_files = os.listdir(profile_dir)
+            if any(f in profile_files for f in ["Preferences", "Login Data", "History"]):
+                # Create Default directory and move files
+                os.makedirs(default_dir, exist_ok=True)
+                for item in profile_files:
+                    if os.path.isfile(os.path.join(profile_dir, item)):
+                        shutil.move(os.path.join(profile_dir, item), os.path.join(default_dir, item))
+        
+        # Count authentication indicators
+        auth_files = []
+        if os.path.exists(os.path.join(default_dir, "Login Data")):
+            auth_files.append("Login Data")
+        if os.path.exists(os.path.join(default_dir, "Preferences")):
+            auth_files.append("Preferences")
+        if os.path.exists(os.path.join(default_dir, "Network", "Cookies")):
+            auth_files.append("Cookies")
+        
+        # Extract cookies from profile for yt-dlp compatibility
+        cookies_extracted = extract_cookies_from_profile(profile_dir)
+        
+        logger.info(f"✅ Uploaded Chrome profile with {len(auth_files)} authentication files")
+        
+        return jsonify({
+            "message": "Chrome profile uploaded successfully",
+            "profile_directory": profile_dir,
+            "authentication_files": auth_files,
+            "cookies_extracted": cookies_extracted,
+            "status": "ready_for_use"
+        })
+        
+    except Exception as e:
+        logger.error(f"❌ Profile upload failed: {str(e)}")
+        return jsonify({"error": f"Profile upload failed: {str(e)}"}), 500
+
+def extract_cookies_from_profile(profile_path):
+    """Extract cookies from Chrome profile and save as text file"""
+    try:
+        cookies_db_path = os.path.join(profile_path, "Default", "Network", "Cookies")
+        
+        if not os.path.exists(cookies_db_path):
+            logger.warning("No cookies database found in profile")
+            return False
+        
+        import sqlite3
+        import tempfile
+        
+        # Copy cookies database to avoid locking issues
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.db') as temp_db:
+            shutil.copy2(cookies_db_path, temp_db.name)
+            temp_db_path = temp_db.name
+        
+        try:
+            conn = sqlite3.connect(temp_db_path)
+            cursor = conn.cursor()
+            
+            # Extract YouTube/Google cookies
+            cursor.execute("""
+                SELECT host_key, name, value, path, expires_utc, is_secure, is_httponly
+                FROM cookies 
+                WHERE host_key LIKE '%youtube%' OR host_key LIKE '%google%' OR host_key LIKE '%googlevideo%'
+                ORDER BY creation_utc DESC
+            """)
+            
+            rows = cursor.fetchall()
+            
+            if not rows:
+                logger.warning("No YouTube/Google cookies found in profile")
+                return False
+            
+            # Convert to Netscape cookie format
+            cookie_lines = ["# Netscape HTTP Cookie File"]
+            cookie_lines.append("# Extracted from Chrome profile")
+            
+            for row in rows:
+                host_key, name, value, path, expires_utc, is_secure, is_httponly = row
+                
+                # Convert Chrome timestamp to Unix timestamp
+                if expires_utc:
+                    expires = int(expires_utc / 1000000 - 11644473600)
+                else:
+                    expires = 0
+                
+                # Format: domain, domain_specified, path, secure, expires, name, value
+                cookie_line = f"{host_key}\tTRUE\t{path}\t{'TRUE' if is_secure else 'FALSE'}\t{expires}\t{name}\t{value}"
+                cookie_lines.append(cookie_line)
+            
+            conn.close()
+            
+            # Save extracted cookies
+            extracted_cookies_file = os.path.join(os.getcwd(), "profile_extracted_cookies.txt")
+            with open(extracted_cookies_file, 'w', encoding='utf-8') as f:
+                f.write('\n'.join(cookie_lines))
+            
+            logger.info(f"✅ Extracted {len(cookie_lines)-2} cookies from profile")
+            return len(cookie_lines) - 2
+            
+        finally:
+            os.unlink(temp_db_path)
+            
+    except Exception as e:
+        logger.error(f"❌ Cookie extraction failed: {str(e)}")
+        return False
+
+@app.route("/profile_status")
+def profile_status():
+    """Check status of uploaded Chrome profiles"""
+    try:
+        profiles = []
+        
+        # Check for different profile directories
+        profile_candidates = [
+            ("authenticated_session", AUTHENTICATED_PROFILE_DIR),
+            ("youtube_profile", YOUTUBE_PROFILE_DIR),
+            ("chrome_profile", CHROME_PROFILE_DIR),
+            ("tldv_profile", "tldv_profile"),
+            ("backup_session", "authenticated_youtube_session_complete_backup")
+        ]
+        
+        for name, path in profile_candidates:
+            if os.path.exists(path):
+                default_dir = os.path.join(path, "Default")
+                
+                # Check authentication files
+                auth_files = []
+                if os.path.exists(os.path.join(default_dir, "Login Data")):
+                    auth_files.append("Login Data")
+                if os.path.exists(os.path.join(default_dir, "Preferences")):
+                    auth_files.append("Preferences")
+                if os.path.exists(os.path.join(default_dir, "Network", "Cookies")):
+                    auth_files.append("Cookies Database")
+                if os.path.exists(os.path.join(default_dir, "History")):
+                    auth_files.append("History")
+                
+                # Get profile size
+                profile_size = sum(
+                    os.path.getsize(os.path.join(dirpath, filename))
+                    for dirpath, dirnames, filenames in os.walk(path)
+                    for filename in filenames
+                )
+                
+                profiles.append({
+                    "name": name,
+                    "path": path,
+                    "size_mb": round(profile_size / (1024 * 1024), 2),
+                    "authentication_files": auth_files,
+                    "has_default_profile": os.path.exists(default_dir),
+                    "status": "authenticated" if len(auth_files) >= 2 else "incomplete"
+                })
+        
+        # Check extracted cookies
+        extracted_cookies_file = os.path.join(os.getcwd(), "profile_extracted_cookies.txt")
+        cookies_available = os.path.exists(extracted_cookies_file)
+        cookie_count = 0
+        
+        if cookies_available:
+            with open(extracted_cookies_file, 'r') as f:
+                cookie_count = sum(1 for line in f if line.strip() and not line.startswith('#'))
+        
+        return jsonify({
+            "profiles_found": len(profiles),
+            "profiles": profiles,
+            "extracted_cookies": {
+                "available": cookies_available,
+                "count": cookie_count,
+                "file": "profile_extracted_cookies.txt" if cookies_available else None
+            },
+            "recommended_profile": profiles[0]["name"] if profiles else None,
+            "status": "ready" if profiles else "no_profiles"
         })
         
     except Exception as e:
