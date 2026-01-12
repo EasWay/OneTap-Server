@@ -201,6 +201,10 @@ class ProfileUploader:
                     else:
                         expires = 0
                     
+                    # Skip cookies with empty values (causes Netscape format issues)
+                    if not value or not name:
+                        continue
+                    
                     # Format: domain, domain_specified, path, secure, expires, name, value
                     cookie_line = f"{host_key}\tTRUE\t{path}\t{'TRUE' if is_secure else 'FALSE'}\t{expires}\t{name}\t{value}"
                     cookie_lines.append(cookie_line)

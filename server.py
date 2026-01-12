@@ -467,11 +467,50 @@ def get_platform_config(platform, youtube_cookies_file=None, chrome_profile_dir=
         # Check for extracted cookies from profile
         profile_cookies_file = os.path.join(os.getcwd(), "profile_extracted_cookies.txt")
         if os.path.exists(profile_cookies_file):
-            config["cookiefile"] = profile_cookies_file
-            logger.info("🍪 Using profile-extracted cookies for YouTube")
+            # Validate the extracted cookies file first
+            try:
+                with open(profile_cookies_file, 'r') as f:
+                    lines = f.readlines()
+                valid_cookies = 0
+                for line in lines:
+                    if line.strip() and not line.startswith('#') and len(line.split('\t')) >= 7:
+                        parts = line.split('\t')
+                        if parts[5] and parts[6]:  # name and value must not be empty
+                            valid_cookies += 1
+                
+                if valid_cookies > 5:  # Need at least some valid cookies
+                    config["cookiefile"] = profile_cookies_file
+                    logger.info(f"🍪 Using profile-extracted cookies for YouTube ({valid_cookies} valid)")
+                else:
+                    raise ValueError(f"Only {valid_cookies} valid cookies found")
+                    
+            except Exception as e:
+                logger.warning(f"⚠️ Profile cookies invalid: {str(e)} - trying fallback")
+                # Remove invalid file and try fallback
+                try:
+                    os.remove(profile_cookies_file)
+                except:
+                    pass
+                
+                # Try fallback cookies
+                fallback_cookies = [
+                    os.path.join(os.getcwd(), "cookies.txt"),
+                    GOOGLE_COOKIES_FILE,
+                    RENDER_COOKIES_FILE
+                ]
+                
+                for cookies_file in fallback_cookies:
+                    if os.path.exists(cookies_file):
+                        config["cookiefile"] = cookies_file
+                        logger.info(f"🍪 Using fallback cookies: {os.path.basename(cookies_file)}")
+                        break
+                        
         elif youtube_cookies_file and os.path.exists(youtube_cookies_file):
             config["cookiefile"] = youtube_cookies_file
             logger.info("🍪 Using Chrome-extracted cookies for YouTube")
+        elif os.path.exists(os.path.join(os.getcwd(), "cookies.txt")):
+            config["cookiefile"] = os.path.join(os.getcwd(), "cookies.txt")
+            logger.info("🍪 Using cookies.txt for YouTube")
         elif os.path.exists(GOOGLE_COOKIES_FILE):
             config["cookiefile"] = GOOGLE_COOKIES_FILE
             logger.info("🍪 Using Google cookies file for YouTube")
@@ -585,51 +624,30 @@ def download_video():
         platform = detect_platform(url)
         logger.info(f"🌍 Detected platform: {platform}")
 
-        # For YouTube, use Chrome authentication with threading timeout
+        # For YouTube, use Chrome authentication
         if platform == "youtube":
             logger.info("🔐 Setting up Chrome authentication for YouTube...")
             youtube_auth = YouTubeAuthenticator()
             
             try:
-                # Use threading timeout instead of signal (which doesn't work in Flask threads)
-                import threading
-                import queue
-                
-                def chrome_auth_worker(result_queue):
-                    try:
-                        if youtube_auth.setup_chrome_driver():
-                            if youtube_auth.load_youtube_cookies():
-                                if youtube_auth.verify_youtube_authentication():
-                                    # Extract cookies for yt-dlp
-                                    cookies_file = youtube_auth.extract_youtube_cookies_for_ytdlp()
-                                    result_queue.put(("success", cookies_file))
-                                    return
-                        result_queue.put(("failed", None))
-                    except Exception as e:
-                        result_queue.put(("error", str(e)))
-                
-                # Run Chrome authentication in a separate thread with timeout
-                result_queue = queue.Queue()
-                auth_thread = threading.Thread(target=chrome_auth_worker, args=(result_queue,))
-                auth_thread.daemon = True
-                auth_thread.start()
-                auth_thread.join(timeout=45)  # 45 second timeout
-                
-                if auth_thread.is_alive():
-                    logger.warning("⚠️ Chrome authentication timed out - continuing with file cookies")
-                else:
-                    try:
-                        status, result = result_queue.get_nowait()
-                        if status == "success" and result:
-                            youtube_cookies_file = result
-                            logger.info("✅ YouTube authentication successful")
+                if youtube_auth.setup_chrome_driver():
+                    if youtube_auth.load_youtube_cookies():
+                        if youtube_auth.verify_youtube_authentication():
+                            # Extract cookies for yt-dlp
+                            youtube_cookies_file = youtube_auth.extract_youtube_cookies_for_ytdlp()
+                            if youtube_cookies_file:
+                                logger.info("✅ YouTube authentication successful")
+                            else:
+                                logger.warning("⚠️ Cookie extraction failed - using profile cookies")
                         else:
-                            logger.warning(f"⚠️ Chrome authentication {status} - continuing with file cookies")
-                    except queue.Empty:
-                        logger.warning("⚠️ Chrome authentication returned no result - continuing with file cookies")
+                            logger.warning("⚠️ Authentication verification failed - using profile cookies")
+                    else:
+                        logger.warning("⚠️ Cookie loading failed - using profile cookies")
+                else:
+                    logger.warning("⚠️ Chrome setup failed - using profile cookies")
                         
             except Exception as chrome_error:
-                logger.warning(f"⚠️ Chrome authentication failed: {str(chrome_error)} - continuing with file cookies")
+                logger.warning(f"⚠️ Chrome authentication failed: {str(chrome_error)} - using profile cookies")
 
         # Generate unique filename
         uid = str(uuid.uuid4())[:8]
@@ -948,6 +966,10 @@ def extract_cookies_from_profile(profile_path):
                     expires = int(expires_utc / 1000000 - 11644473600)
                 else:
                     expires = 0
+                
+                # Skip cookies with empty values (causes Netscape format issues)
+                if not value or not name:
+                    continue
                 
                 # Format: domain, domain_specified, path, secure, expires, name, value
                 cookie_line = f"{host_key}\tTRUE\t{path}\t{'TRUE' if is_secure else 'FALSE'}\t{expires}\t{name}\t{value}"
