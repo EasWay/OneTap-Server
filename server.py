@@ -178,7 +178,7 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     logger.info(f"🛠️ OneTap Multi-Platform Server starting on port {port}")
     # Fixed the syntax error here:
-    app.run(host="0.0.0.0", port=port, threaded=True)rer",
+    app.run(host="0.0.0.0", port=port, threaded=True)
                 "meta[property='og:title']"
             ]
             
