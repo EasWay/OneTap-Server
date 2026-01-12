@@ -19,9 +19,9 @@ app = Flask(__name__)
 DOWNLOAD_DIR = os.path.join(os.getcwd(), "downloads")
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
-# Separate cookie files for different contexts
+# Separate cookie files
 GOOGLE_COOKIES_FILE = os.path.join(os.getcwd(), "google_cookies.txt")
-SOCIAL_COOKIES_FILE = os.path.join(os.getcwd(), "cookies.txt")  # For FB, Insta, etc.
+SOCIAL_COOKIES_FILE = os.path.join(os.getcwd(), "cookies.txt")
 
 # Exact UA for session consistency
 EXACT_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.7499.192 Safari/537.36"
@@ -56,7 +56,6 @@ def detect_platform(url):
 
 @app.route("/update_cookies", methods=["POST"])
 def update_social_cookies():
-    """Endpoint to upload cookies.txt for Facebook/Instagram"""
     try:
         if 'file' not in request.files: return jsonify({"error": "No file"}), 400
         file = request.files['file']
@@ -68,7 +67,6 @@ def update_social_cookies():
 
 @app.route("/update_google_cookies", methods=["POST"])
 def update_google_cookies():
-    """Endpoint specifically for YouTube/Google cookies"""
     try:
         if 'file' not in request.files: return jsonify({"error": "No file"}), 400
         file = request.files['file']
@@ -89,13 +87,13 @@ def download_video():
         platform = detect_platform(url)
         logger.info(f"🌍 Detected platform: {platform}")
 
-        # Base Options (Common for all)
+        uid = str(uuid.uuid4())
+        # Base Options
         ydl_opts = {
-            "outtmpl": os.path.join(DOWNLOAD_DIR, f"{uuid.uuid4()}.%(ext)s"),
+            "outtmpl": os.path.join(DOWNLOAD_DIR, f"{uid}.%(ext)s"),
             "user_agent": EXACT_UA,
             "quiet": False,
             "no_warnings": False,
-            # Universal format constraint (H.264 video + AAC audio) for compatibility
             "format": "bestvideo[vcodec^=avc1]+bestaudio[ext=m4a]/best[ext=mp4]/best",
             "merge_output_format": "mp4",
             "http_headers": {
@@ -106,9 +104,7 @@ def download_video():
         }
 
         # --- PLATFORM SPECIFIC STRATEGIES ---
-
         if platform == "youtube":
-            # YouTube needs Deno + iOS Client + Google Cookies
             deno_exe = get_deno_path()
             ydl_opts["js_engine"] = "deno"
             ydl_opts["js_runtimes"] = [deno_exe]
@@ -127,24 +123,21 @@ def download_video():
                 ydl_opts["extractor_args"] = {"youtube": {"player_client": ["ios", "web"]}}
 
         elif platform in ["facebook", "instagram"]:
-            # Meta platforms STRICTLY need cookies often
             if os.path.exists(SOCIAL_COOKIES_FILE):
                 logger.info(f"🍪 Using Social cookies for {platform}")
                 ydl_opts["cookiefile"] = SOCIAL_COOKIES_FILE
-            else:
-                logger.warning(f"⚠️ No cookies found for {platform}. Download might fail due to login requirements.")
             
-            # Instagram specific fixes
             if platform == "instagram":
-                ydl_opts["format"] = "best" # Instagram formats are usually simple
+                ydl_opts["format"] = "best" 
 
         elif platform == "tiktok":
-            # TikTok often sends raw video bytes, no merging needed usually
             ydl_opts["format"] = "best[ext=mp4]/best"
-            # TikTok sometimes blocks generic User-Agents, but EXACT_UA usually works
 
         # --- EXECUTION ---
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            if platform == "youtube":
+                logger.info(f"Using Deno at: {get_deno_path()}")
+            
             info = ydl.extract_info(url, download=True)
             filename = os.path.basename(ydl.prepare_filename(info))
             
@@ -162,11 +155,10 @@ def download_video():
         error_msg = str(e)
         logger.error(f"❌ Download failed: {error_msg}")
         
-        # Friendly Error Handling
         if "confirm you're not a bot" in error_msg.lower():
             return jsonify({"error": "Bot check triggered. Refresh cookies."}), 403
-        if "login" in error_msg.lower() or "authentication" in error_msg.lower():
-            return jsonify({"error": "Login required. Please upload 'cookies.txt' via the /update_cookies endpoint."}), 401
+        if "login" in error_msg.lower():
+            return jsonify({"error": f"Login required for {platform}. Upload cookies."}), 401
             
         return jsonify({"error": error_msg}), 500
 
@@ -176,81 +168,17 @@ def files(filename):
 
 @app.route("/version", methods=["GET"])
 def check_version():
-    return jsonify({"latest_version": 4, "status": "active", "features": ["youtube", "tiktok", "facebook", "instagram", "twitter"]})
+    return jsonify({
+        "latest_version": 4, 
+        "status": "active", 
+        "features": ["youtube", "tiktok", "facebook", "instagram", "twitter"]
+    })
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     logger.info(f"🛠️ OneTap Multi-Platform Server starting on port {port}")
-    app.run(host="0.0.0.0", port=port, threaded=True)      if IS_RENDER and os.path.exists(COOKIES_FILE):
-                cookies_sources.append(COOKIES_FILE)
-            
-            local_cookies = os.path.join(os.getcwd(), "google_cookies.txt")
-            if os.path.exists(local_cookies):
-                cookies_sources.append(local_cookies)
-            
-            if cookies_sources:
-                ydl_opts["cookiefile"] = cookies_sources[0]
-                logger.info(f"🍪 Using cookies from: {cookies_sources[0]}")
-            
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url, download=False)
-                
-                title = info.get('title', 'Unknown')
-                duration = info.get('duration', 0)
-                video_id = info.get('id', self.extract_video_id(url))
-                
-                logger.info(f"📺 Video title: {title}")
-                logger.info(f"⏱️ Video duration: {duration}s")
-                
-                return {
-                    "title": title,
-                    "duration": duration,
-                    "video_id": video_id,
-                    "original_url": url,
-                    "cookies_used": len(cookies_sources) > 0,
-                    "method": "yt-dlp_fallback"
-                }
-                
-        except Exception as e:
-            logger.error(f"❌ Error extracting video info with yt-dlp: {str(e)}")
-            # Return basic info from URL
-            video_id = self.extract_video_id(url)
-            return {
-                "title": f"Video {video_id}" if video_id else "Unknown Video",
-                "duration": 0,
-                "video_id": video_id,
-                "original_url": url,
-                "cookies_used": False,
-                "method": "basic_fallback"
-            }
-
-    def extract_video_info(self, url):
-        """Extract video information using Selenium"""
-        try:
-            logger.info(f"🔍 Extracting video info from: {url}")
-            
-            # Load cookies if not already loaded
-            if not self.cookies_loaded:
-                self.load_authenticated_cookies()
-            
-            # Navigate to the video
-            self.driver.get(url)
-            time.sleep(5)
-            
-            # Wait for page to load
-            try:
-                WebDriverWait(self.driver, 15).until(
-                    lambda driver: driver.execute_script("return document.readyState") == "complete"
-                )
-            except TimeoutException:
-                logger.warning("⚠️ Page load timeout, continuing...")
-            
-            # Extract video title
-            title = "Unknown"
-            title_selectors = [
-                "h1.ytd-video-primary-info-renderer",
-                "h1 yt-formatted-string",
-                "h1.style-scope.ytd-video-primary-info-renderer",
+    # Fixed the syntax error here:
+    app.run(host="0.0.0.0", port=port, threaded=True)rer",
                 "meta[property='og:title']"
             ]
             
