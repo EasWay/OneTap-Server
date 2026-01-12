@@ -179,8 +179,6 @@ if __name__ == "__main__":
     logger.info(f"🛠️ OneTap Multi-Platform Server starting on port {port}")
     # Fixed the syntax error here:
     app.run(host="0.0.0.0", port=port, threaded=True)
-            "meta[property='og:title']"
-            ]
             
             for selector in title_selectors:
                 try:
