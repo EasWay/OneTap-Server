@@ -718,12 +718,14 @@ class YouTubeAuthenticator:
                 cookie_lines.append(f"# Extracted at: {time.strftime('%Y-%m-%d %H:%M:%S')}")
                 
                 essential_cookies = 0
+                valid_cookies = 0
                 
                 for row in rows:
                     host_key, name, value, path, expires_utc, is_secure, is_httponly = row
                     
                     # Skip cookies with empty values
                     if not value or not name:
+                        logger.debug(f"⏭️ Skipping empty cookie: {name}")
                         continue
                     
                     # Convert Chrome timestamp to Unix timestamp
@@ -735,10 +737,12 @@ class YouTubeAuthenticator:
                     # Format: domain, domain_specified, path, secure, expires, name, value
                     cookie_line = f"{host_key}\tTRUE\t{path}\t{'TRUE' if is_secure else 'FALSE'}\t{expires}\t{name}\t{value}"
                     cookie_lines.append(cookie_line)
+                    valid_cookies += 1
                     
                     # Count essential cookies
                     if name in ['SAPISID', 'HSID', 'SSID', 'APISID', 'SID', '__Secure-3PAPISID']:
                         essential_cookies += 1
+                        logger.debug(f"✅ Found essential auth cookie: {name} for {host_key}")
                 
                 conn.close()
                 
@@ -747,8 +751,17 @@ class YouTubeAuthenticator:
                 with open(temp_cookies_file, 'w', encoding='utf-8') as f:
                     f.write('\n'.join(cookie_lines))
                 
-                logger.info(f"✅ Extracted {len(cookie_lines)-3} cookies from profile database")
+                # Verify the file
+                file_size = os.path.getsize(temp_cookies_file)
+                logger.info(f"💾 Saved cookies to: {temp_cookies_file} ({file_size} bytes)")
+                
+                logger.info(f"✅ Extracted {valid_cookies} valid cookies from profile database")
                 logger.info(f"✅ Found {essential_cookies} essential authentication cookies")
+                
+                if essential_cookies >= 2:
+                    logger.info("🔐 Strong authentication expected with profile cookies")
+                else:
+                    logger.warning(f"⚠️ Only {essential_cookies} essential cookies - authentication may be limited")
                 
                 return temp_cookies_file
                 
@@ -757,6 +770,7 @@ class YouTubeAuthenticator:
                 
         except Exception as e:
             logger.error(f"❌ Profile file cookie extraction failed: {str(e)}")
+            logger.exception("Profile cookie extraction error traceback:")
             return None
     
     def cleanup(self):
@@ -901,18 +915,23 @@ def get_platform_config(platform, youtube_cookies_file=None, chrome_profile_dir=
         if os.path.exists(profile_cookies_file):
             # Validate the extracted cookies file first
             try:
-                with open(profile_cookies_file, 'r') as f:
+                with open(profile_cookies_file, 'r', encoding='utf-8') as f:
                     lines = f.readlines()
                 valid_cookies = 0
+                essential_cookies = 0
+                
                 for line in lines:
                     if line.strip() and not line.startswith('#') and len(line.split('\t')) >= 7:
                         parts = line.split('\t')
-                        if parts[5] and parts[6]:  # name and value must not be empty
+                        if len(parts) >= 7 and parts[5] and parts[6]:  # name and value must not be empty
                             valid_cookies += 1
+                            # Check for essential auth cookies
+                            if parts[5] in ['SAPISID', 'HSID', 'SSID', 'APISID', 'SID', '__Secure-3PAPISID']:
+                                essential_cookies += 1
                 
                 if valid_cookies > 5:  # Need at least some valid cookies
                     config["cookiefile"] = profile_cookies_file
-                    logger.info(f"🍪 Using profile-extracted cookies for YouTube ({valid_cookies} valid)")
+                    logger.info(f"🍪 Using profile-extracted cookies for YouTube ({valid_cookies} valid, {essential_cookies} essential)")
                 else:
                     raise ValueError(f"Only {valid_cookies} valid cookies found")
                     
@@ -1063,23 +1082,21 @@ def download_video():
             
             try:
                 if youtube_auth.setup_chrome_driver():
-                    if youtube_auth.load_youtube_cookies():
-                        if youtube_auth.verify_youtube_authentication():
-                            # Extract cookies for yt-dlp
-                            youtube_cookies_file = youtube_auth.extract_youtube_cookies_for_ytdlp()
-                            if youtube_cookies_file:
-                                logger.info("✅ YouTube authentication successful")
-                            else:
-                                logger.warning("⚠️ Cookie extraction failed - using profile cookies")
-                        else:
-                            logger.warning("⚠️ Authentication verification failed - using profile cookies")
+                    # Skip the slow verification steps and go straight to cookie extraction
+                    logger.info("⚡ Fast-track: Skipping verification, extracting cookies directly...")
+                    
+                    # Try direct cookie extraction from profile files first (fastest)
+                    youtube_cookies_file = youtube_auth.extract_cookies_from_profile_files()
+                    
+                    if youtube_cookies_file:
+                        logger.info("✅ YouTube authentication successful via profile files")
                     else:
-                        logger.warning("⚠️ Cookie loading failed - using profile cookies")
+                        logger.warning("⚠️ Profile file extraction failed - using fallback cookies")
                 else:
-                    logger.warning("⚠️ Chrome setup failed - using profile cookies")
+                    logger.warning("⚠️ Chrome setup failed - using fallback cookies")
                         
             except Exception as chrome_error:
-                logger.warning(f"⚠️ Chrome authentication failed: {str(chrome_error)} - using profile cookies")
+                logger.warning(f"⚠️ Chrome authentication failed: {str(chrome_error)} - using fallback cookies")
 
         # Generate unique filename
         uid = str(uuid.uuid4())[:8]
@@ -1091,6 +1108,11 @@ def download_video():
         
         ydl_opts = get_platform_config(platform, youtube_cookies_file, chrome_profile_dir)
         ydl_opts["outtmpl"] = os.path.join(DOWNLOAD_DIR, f"{uid}_%(title)s.%(ext)s")
+        
+        # Clean up Chrome immediately after getting cookies to prevent hanging
+        if youtube_auth:
+            logger.info("🧹 Cleaning up Chrome driver before download...")
+            youtube_auth.cleanup()
         
         # Execute download
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
