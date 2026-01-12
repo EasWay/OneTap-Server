@@ -142,7 +142,7 @@ class YouTubeAuthenticator:
             
             # Navigate to YouTube first
             self.driver.get("https://www.youtube.com")
-            time.sleep(2)
+            time.sleep(3)
             
             # Load cookies from the first available source
             cookies_file = cookie_sources[0]
@@ -162,19 +162,23 @@ class YouTubeAuthenticator:
                             name = parts[5]
                             value = parts[6]
                             
-                            # Only load YouTube/Google cookies
-                            if 'youtube' in domain or 'google' in domain:
+                            # Load all Google/YouTube related cookies
+                            if any(keyword in domain.lower() for keyword in ['youtube', 'google', 'googlevideo', 'gstatic']):
                                 cookie_dict = {
                                     'name': name,
                                     'value': value,
                                     'domain': domain
                                 }
                                 
-                                self.driver.add_cookie(cookie_dict)
-                                cookies_loaded += 1
+                                try:
+                                    self.driver.add_cookie(cookie_dict)
+                                    cookies_loaded += 1
+                                except Exception as cookie_error:
+                                    # Some cookies might fail due to domain restrictions, that's okay
+                                    pass
                                 
                     except Exception as e:
-                        logger.warning(f"⚠️ Failed to load cookie: {str(e)}")
+                        logger.warning(f"⚠️ Failed to parse cookie line: {str(e)}")
                         continue
             
             logger.info(f"✅ Loaded {cookies_loaded} YouTube cookies")
@@ -183,7 +187,7 @@ class YouTubeAuthenticator:
             # Refresh page to apply cookies
             if self.cookies_loaded:
                 self.driver.refresh()
-                time.sleep(3)
+                time.sleep(5)  # Give more time for page to load with cookies
             
             return self.cookies_loaded
             
@@ -195,22 +199,67 @@ class YouTubeAuthenticator:
         """Verify YouTube authentication status"""
         try:
             self.driver.get("https://www.youtube.com")
-            time.sleep(3)
+            time.sleep(5)
             
-            # Check for sign-in button (if present, not authenticated)
-            sign_in_elements = self.driver.find_elements(By.XPATH, "//a[contains(@aria-label, 'Sign in')]")
+            # Multiple ways to check authentication
+            authentication_indicators = [
+                # Check for user avatar/profile button
+                (By.ID, "avatar-btn"),
+                (By.CSS_SELECTOR, "button[aria-label*='Account menu']"),
+                (By.CSS_SELECTOR, "img[alt*='Avatar']"),
+                # Check for account-related elements
+                (By.CSS_SELECTOR, "[aria-label*='Create']"),
+                (By.CSS_SELECTOR, "ytd-topbar-menu-button-renderer"),
+            ]
             
-            if sign_in_elements:
-                logger.warning("⚠️ YouTube: User not authenticated")
-                return False
+            for by, selector in authentication_indicators:
+                try:
+                    elements = self.driver.find_elements(by, selector)
+                    if elements:
+                        logger.info(f"✅ YouTube: Authentication verified via {selector}")
+                        return True
+                except:
+                    continue
             
-            # Check for user avatar or account menu
-            avatar_elements = self.driver.find_elements(By.ID, "avatar-btn")
-            if avatar_elements:
-                logger.info("✅ YouTube: User is authenticated")
-                return True
+            # Check if we can access account-specific URLs
+            try:
+                self.driver.get("https://www.youtube.com/feed/subscriptions")
+                time.sleep(3)
                 
-            return False
+                # If we're redirected to sign-in, we're not authenticated
+                current_url = self.driver.current_url
+                if "accounts.google.com" in current_url or "signin" in current_url:
+                    logger.warning("⚠️ YouTube: Redirected to sign-in page")
+                    return False
+                
+                # Look for subscription content or feed elements
+                feed_elements = self.driver.find_elements(By.CSS_SELECTOR, "ytd-browse[page-subtype='subscriptions']")
+                if feed_elements:
+                    logger.info("✅ YouTube: Authentication verified via subscriptions page")
+                    return True
+                    
+            except Exception as e:
+                logger.warning(f"⚠️ Could not verify via subscriptions: {str(e)}")
+            
+            # Final check: look for sign-in button (indicates not authenticated)
+            sign_in_selectors = [
+                "//a[contains(@aria-label, 'Sign in')]",
+                "//button[contains(text(), 'Sign in')]",
+                "//a[contains(text(), 'Sign in')]"
+            ]
+            
+            for selector in sign_in_selectors:
+                try:
+                    sign_in_elements = self.driver.find_elements(By.XPATH, selector)
+                    if sign_in_elements and sign_in_elements[0].is_displayed():
+                        logger.warning("⚠️ YouTube: Sign-in button found - not authenticated")
+                        return False
+                except:
+                    continue
+            
+            # If we get here, assume we're authenticated (no sign-in button found)
+            logger.info("✅ YouTube: No sign-in indicators found - likely authenticated")
+            return True
             
         except Exception as e:
             logger.error(f"❌ YouTube authentication verification failed: {str(e)}")
@@ -314,16 +363,19 @@ def get_platform_config(platform, youtube_cookies_file=None):
         config = {
             **base_config,
             "format": "bestvideo[vcodec^=avc1]+bestaudio[ext=m4a]/best[ext=mp4]/best",
-            "js_engine": "deno",
-            "js_runtimes": [deno_exe],
-            "remote_components": "ejs:github",
             "extractor_args": {
                 "youtube": {
-                    "player_client": ["ios", "web"],
-                    "remote_components": ["ejs:github"]
+                    "player_client": ["ios", "web"]
                 }
             }
         }
+        
+        # Add Deno support if available
+        if os.path.exists(deno_exe):
+            config["extractor_args"]["youtube"]["js_engine"] = "deno"
+            config["extractor_args"]["youtube"]["js_runtimes"] = {
+                "deno": {"executable": deno_exe}
+            }
         
         # Use Chrome-extracted cookies if available, otherwise fallback to file cookies
         if youtube_cookies_file and os.path.exists(youtube_cookies_file):
@@ -442,18 +494,21 @@ def download_video():
             logger.info("🔐 Setting up Chrome authentication for YouTube...")
             youtube_auth = YouTubeAuthenticator()
             
-            if youtube_auth.setup_chrome_driver():
-                if youtube_auth.load_youtube_cookies():
-                    if youtube_auth.verify_youtube_authentication():
-                        # Extract cookies for yt-dlp
-                        youtube_cookies_file = youtube_auth.extract_youtube_cookies_for_ytdlp()
-                        logger.info("✅ YouTube authentication successful")
+            try:
+                if youtube_auth.setup_chrome_driver():
+                    if youtube_auth.load_youtube_cookies():
+                        if youtube_auth.verify_youtube_authentication():
+                            # Extract cookies for yt-dlp
+                            youtube_cookies_file = youtube_auth.extract_youtube_cookies_for_ytdlp()
+                            logger.info("✅ YouTube authentication successful")
+                        else:
+                            logger.warning("⚠️ YouTube authentication verification failed - continuing with file cookies")
                     else:
-                        logger.warning("⚠️ YouTube authentication verification failed")
+                        logger.warning("⚠️ No YouTube cookies loaded - continuing with file cookies")
                 else:
-                    logger.warning("⚠️ No YouTube cookies loaded")
-            else:
-                logger.warning("⚠️ Chrome driver setup failed, using fallback")
+                    logger.warning("⚠️ Chrome driver setup failed - continuing with file cookies")
+            except Exception as chrome_error:
+                logger.warning(f"⚠️ Chrome authentication failed: {str(chrome_error)} - continuing with file cookies")
 
         # Generate unique filename
         uid = str(uuid.uuid4())[:8]
