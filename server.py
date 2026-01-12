@@ -22,12 +22,21 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, NoSuchElementException
 
-# Configure logging
+# Configure comprehensive logging
 logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
+    level=logging.DEBUG,
+    format='%(asctime)s - %(name)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s',
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler('/tmp/onetap_server.log', mode='a')
+    ]
 )
 logger = logging.getLogger(__name__)
+
+# Set specific log levels for different components
+logging.getLogger('selenium').setLevel(logging.WARNING)
+logging.getLogger('urllib3').setLevel(logging.WARNING)
+logging.getLogger('requests').setLevel(logging.INFO)
 
 # Initialize Flask app
 app = Flask(__name__)
@@ -64,6 +73,8 @@ class YouTubeAuthenticator:
         
     def find_authenticated_profile(self):
         """Find the best authenticated Chrome profile to use"""
+        logger.info("🔍 Searching for authenticated Chrome profiles...")
+        
         profile_candidates = [
             AUTHENTICATED_PROFILE_DIR,
             YOUTUBE_PROFILE_DIR,
@@ -73,26 +84,52 @@ class YouTubeAuthenticator:
         ]
         
         for profile_dir in profile_candidates:
+            logger.debug(f"Checking profile candidate: {profile_dir}")
+            
             if os.path.exists(profile_dir):
+                logger.info(f"📁 Found profile directory: {profile_dir}")
+                
                 # Check if profile has authentication data
                 default_dir = os.path.join(profile_dir, "Default")
                 if os.path.exists(default_dir):
+                    logger.debug(f"✅ Default directory exists: {default_dir}")
+                    
                     # Look for key authentication files
                     auth_files = [
-                        os.path.join(default_dir, "Login Data"),
-                        os.path.join(default_dir, "Preferences"),
-                        os.path.join(default_dir, "Network", "Cookies")
+                        ("Login Data", os.path.join(default_dir, "Login Data")),
+                        ("Preferences", os.path.join(default_dir, "Preferences")),
+                        ("Network/Cookies", os.path.join(default_dir, "Network", "Cookies")),
+                        ("Local Storage", os.path.join(default_dir, "Local Storage")),
+                        ("IndexedDB", os.path.join(default_dir, "IndexedDB"))
                     ]
                     
-                    if any(os.path.exists(f) for f in auth_files):
-                        logger.info(f"🔍 Found authenticated profile: {profile_dir}")
+                    found_auth_files = []
+                    for name, path in auth_files:
+                        if os.path.exists(path):
+                            size = "dir" if os.path.isdir(path) else f"{os.path.getsize(path)} bytes"
+                            logger.debug(f"  ✅ {name}: {size}")
+                            found_auth_files.append(name)
+                        else:
+                            logger.debug(f"  ❌ {name}: missing")
+                    
+                    if len(found_auth_files) >= 2:
+                        logger.info(f"🔐 Selected authenticated profile: {profile_dir}")
+                        logger.info(f"   Authentication files found: {', '.join(found_auth_files)}")
                         return profile_dir
+                    else:
+                        logger.warning(f"⚠️ Profile {profile_dir} has insufficient auth files: {found_auth_files}")
+                else:
+                    logger.warning(f"⚠️ Profile {profile_dir} missing Default directory")
+            else:
+                logger.debug(f"❌ Profile not found: {profile_dir}")
         
-        logger.warning("⚠️ No authenticated Chrome profile found")
+        logger.error("❌ No authenticated Chrome profile found")
         return None
         
     def setup_chrome_driver(self):
         """Setup Chrome driver for YouTube authentication with profile support"""
+        logger.info("🚀 Initializing Chrome driver for YouTube authentication...")
+        
         try:
             chrome_options = Options()
             
@@ -105,38 +142,63 @@ class YouTubeAuthenticator:
                 chrome_options.add_argument("--profile-directory=Default")
                 logger.info(f"🔐 Using authenticated profile: {self.active_profile_dir}")
                 self.profile_loaded = True
+                
+                # Log profile size and contents
+                try:
+                    profile_size = sum(
+                        os.path.getsize(os.path.join(dirpath, filename))
+                        for dirpath, dirnames, filenames in os.walk(self.active_profile_dir)
+                        for filename in filenames
+                    )
+                    logger.info(f"📊 Profile size: {profile_size / (1024*1024):.1f} MB")
+                except Exception as e:
+                    logger.warning(f"⚠️ Could not calculate profile size: {e}")
+                    
             else:
                 # Create temporary profile directory
                 temp_profile = os.path.join(os.getcwd(), "temp_chrome_profile")
                 os.makedirs(temp_profile, exist_ok=True)
                 chrome_options.add_argument(f"--user-data-dir={temp_profile}")
-                logger.info("🔐 Using temporary profile (no authenticated profile found)")
+                logger.warning("⚠️ Using temporary profile (no authenticated profile found)")
             
-            # Headless mode for server environment with memory optimizations
-            chrome_options.add_argument("--headless=new")
-            chrome_options.add_argument("--no-sandbox")
-            chrome_options.add_argument("--disable-dev-shm-usage")
-            chrome_options.add_argument("--disable-gpu")
-            chrome_options.add_argument("--disable-software-rasterizer")
-            chrome_options.add_argument("--disable-background-timer-throttling")
-            chrome_options.add_argument("--disable-backgrounding-occluded-windows")
-            chrome_options.add_argument("--disable-renderer-backgrounding")
-            chrome_options.add_argument("--disable-features=TranslateUI")
-            chrome_options.add_argument("--disable-ipc-flooding-protection")
-            chrome_options.add_argument("--memory-pressure-off")
-            chrome_options.add_argument("--remote-debugging-port=9222")
-            chrome_options.add_argument("--disable-extensions")
-            chrome_options.add_argument("--disable-plugins")
-            chrome_options.add_argument("--disable-images")  # Save memory
-            chrome_options.add_argument("--max_old_space_size=512")  # Limit memory
-            chrome_options.add_argument("--aggressive-cache-discard")
+            # Chrome options for server environment
+            server_options = [
+                "--headless=new",
+                "--no-sandbox", 
+                "--disable-dev-shm-usage",
+                "--disable-gpu",
+                "--disable-software-rasterizer",
+                "--disable-background-timer-throttling",
+                "--disable-backgrounding-occluded-windows",
+                "--disable-renderer-backgrounding",
+                "--disable-features=TranslateUI",
+                "--disable-ipc-flooding-protection",
+                "--memory-pressure-off",
+                "--remote-debugging-port=9222",
+                "--disable-extensions",
+                "--disable-plugins",
+                "--disable-images",
+                "--max_old_space_size=512",
+                "--aggressive-cache-discard"
+            ]
+            
+            for option in server_options:
+                chrome_options.add_argument(option)
+                logger.debug(f"Added Chrome option: {option}")
             
             # Anti-detection options
-            chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+            anti_detection_options = [
+                "--disable-blink-features=AutomationControlled",
+                "--window-size=1920,1080",
+                f"--user-agent={EXACT_UA}"
+            ]
+            
+            for option in anti_detection_options:
+                chrome_options.add_argument(option)
+                logger.debug(f"Added anti-detection option: {option}")
+            
             chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
             chrome_options.add_experimental_option('useAutomationExtension', False)
-            chrome_options.add_argument("--window-size=1920,1080")
-            chrome_options.add_argument(f"--user-agent={EXACT_UA}")
             
             # Preserve session data
             chrome_options.add_argument("--disable-web-security")
@@ -149,11 +211,16 @@ class YouTubeAuthenticator:
                 "/opt/chrome-linux64/chrome"
             ]
             
+            chrome_binary = None
             for chrome_path in chrome_paths:
                 if os.path.exists(chrome_path):
                     chrome_options.binary_location = chrome_path
+                    chrome_binary = chrome_path
                     logger.info(f"🔍 Using Chrome binary: {chrome_path}")
                     break
+            
+            if not chrome_binary:
+                logger.warning("⚠️ No Chrome binary found in standard locations")
             
             # Try to use the installed ChromeDriver
             chromedriver_paths = [
@@ -162,36 +229,68 @@ class YouTubeAuthenticator:
             ]
             
             service = None
+            chromedriver_binary = None
             for driver_path in chromedriver_paths:
                 if os.path.exists(driver_path):
                     service = Service(driver_path)
+                    chromedriver_binary = driver_path
                     logger.info(f"🔍 Using ChromeDriver: {driver_path}")
                     break
+            
+            if not chromedriver_binary:
+                logger.warning("⚠️ No ChromeDriver found in standard locations")
+            
+            # Initialize Chrome driver
+            logger.info("🚀 Starting Chrome WebDriver...")
+            start_time = time.time()
             
             if service:
                 self.driver = webdriver.Chrome(service=service, options=chrome_options)
             else:
                 self.driver = webdriver.Chrome(options=chrome_options)
             
+            init_time = time.time() - start_time
+            logger.info(f"⏱️ Chrome driver initialized in {init_time:.2f} seconds")
+            
             # Execute anti-detection scripts
+            logger.debug("🛡️ Applying anti-detection measures...")
             self.driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
             self.driver.execute_script("Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]})")
             self.driver.execute_script("Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']})")
             
-            logger.info("✅ Chrome driver initialized for YouTube authentication")
+            # Log browser info
+            try:
+                user_agent = self.driver.execute_script("return navigator.userAgent;")
+                logger.debug(f"🌐 Browser User Agent: {user_agent}")
+                
+                window_size = self.driver.get_window_size()
+                logger.debug(f"📐 Window size: {window_size['width']}x{window_size['height']}")
+            except Exception as e:
+                logger.warning(f"⚠️ Could not get browser info: {e}")
+            
+            logger.info("✅ Chrome driver initialized successfully for YouTube authentication")
             return True
             
         except Exception as e:
             logger.error(f"❌ Error setting up Chrome driver: {str(e)}")
+            logger.exception("Full Chrome setup error traceback:")
             return False
     
     def load_youtube_cookies(self):
         """Load YouTube cookies into Chrome (fallback if profile doesn't have auth)"""
+        logger.info("🍪 Loading YouTube authentication...")
+        
         try:
             # If we're using an authenticated profile, check if it already has auth
             if self.profile_loaded and self.active_profile_dir:
+                logger.info("🔍 Testing existing profile authentication...")
+                
                 # Navigate to YouTube to test existing authentication
+                start_time = time.time()
                 self.driver.get("https://www.youtube.com")
+                load_time = time.time() - start_time
+                logger.info(f"⏱️ YouTube page loaded in {load_time:.2f} seconds")
+                
                 time.sleep(3)
                 
                 # Quick check for existing authentication
@@ -199,36 +298,58 @@ class YouTubeAuthenticator:
                     auth_elements = self.driver.find_elements(By.CSS_SELECTOR, "ytd-topbar-menu-button-renderer")
                     if auth_elements:
                         logger.info("✅ Profile already authenticated - using existing session")
+                        logger.debug(f"Found {len(auth_elements)} authentication elements")
                         self.cookies_loaded = True
                         return True
-                except:
-                    pass
+                    else:
+                        logger.info("🔍 No authentication elements found, checking for sign-in button...")
+                        
+                        sign_in_elements = self.driver.find_elements(By.XPATH, "//a[contains(@aria-label, 'Sign in')]")
+                        if sign_in_elements:
+                            logger.warning("⚠️ Sign-in button found - profile not authenticated")
+                        else:
+                            logger.info("✅ No sign-in button found - assuming authenticated")
+                            self.cookies_loaded = True
+                            return True
+                            
+                except Exception as e:
+                    logger.warning(f"⚠️ Error checking profile authentication: {e}")
             
             # Fallback to cookie loading if profile auth failed
+            logger.info("🔄 Falling back to cookie file loading...")
+            
             cookie_sources = []
             
             if os.path.exists(GOOGLE_COOKIES_FILE):
-                cookie_sources.append(GOOGLE_COOKIES_FILE)
+                cookie_sources.append(("Google cookies", GOOGLE_COOKIES_FILE))
             if os.path.exists(RENDER_COOKIES_FILE):
-                cookie_sources.append(RENDER_COOKIES_FILE)
+                cookie_sources.append(("Render cookies", RENDER_COOKIES_FILE))
             
             if not cookie_sources:
-                logger.warning("⚠️ No YouTube cookies found and profile not authenticated")
+                logger.error("❌ No YouTube cookies found and profile not authenticated")
                 return False
             
-            # Navigate to YouTube first
-            self.driver.get("https://www.youtube.com")
-            time.sleep(3)
+            # Navigate to YouTube first if not already there
+            current_url = self.driver.current_url
+            if "youtube.com" not in current_url:
+                logger.info("🌐 Navigating to YouTube...")
+                self.driver.get("https://www.youtube.com")
+                time.sleep(3)
             
             # Load cookies from the first available source
-            cookies_file = cookie_sources[0]
-            logger.info(f"🍪 Loading YouTube cookies from: {cookies_file}")
+            source_name, cookies_file = cookie_sources[0]
+            logger.info(f"🍪 Loading cookies from: {source_name} ({cookies_file})")
             
+            # Read and parse cookies file
             with open(cookies_file, 'r') as f:
                 lines = f.readlines()
             
+            logger.info(f"📄 Cookie file has {len(lines)} lines")
+            
             cookies_loaded = 0
-            for line in lines:
+            cookies_skipped = 0
+            
+            for line_num, line in enumerate(lines, 1):
                 line = line.strip()
                 if line and not line.startswith('#'):
                     try:
@@ -249,82 +370,190 @@ class YouTubeAuthenticator:
                                 try:
                                     self.driver.add_cookie(cookie_dict)
                                     cookies_loaded += 1
+                                    logger.debug(f"✅ Added cookie: {name} for {domain}")
                                 except Exception as cookie_error:
-                                    # Some cookies might fail due to domain restrictions, that's okay
-                                    pass
+                                    cookies_skipped += 1
+                                    logger.debug(f"⚠️ Skipped cookie {name}: {str(cookie_error)}")
+                            else:
+                                logger.debug(f"⏭️ Skipped non-YouTube cookie for domain: {domain}")
                                 
                     except Exception as e:
-                        logger.warning(f"⚠️ Failed to parse cookie line: {str(e)}")
+                        logger.warning(f"⚠️ Failed to parse cookie line {line_num}: {str(e)}")
                         continue
             
-            logger.info(f"✅ Loaded {cookies_loaded} YouTube cookies")
+            logger.info(f"✅ Loaded {cookies_loaded} YouTube cookies (skipped {cookies_skipped})")
             self.cookies_loaded = cookies_loaded > 0
             
             # Refresh page to apply cookies
             if self.cookies_loaded:
+                logger.info("🔄 Refreshing page to apply cookies...")
                 self.driver.refresh()
                 time.sleep(5)  # Give more time for page to load with cookies
+                logger.info("✅ Page refreshed with new cookies")
             
             return self.cookies_loaded
             
         except Exception as e:
             logger.error(f"❌ Error loading YouTube cookies: {str(e)}")
+            logger.exception("Full cookie loading error traceback:")
             return False
     
     def verify_youtube_authentication(self):
-        """Verify YouTube authentication status with timeout"""
+        """Verify YouTube authentication status with comprehensive logging"""
+        logger.info("🔍 Verifying YouTube authentication status...")
+        
         try:
             # Set page load timeout
             self.driver.set_page_load_timeout(30)
             
-            self.driver.get("https://www.youtube.com")
-            time.sleep(3)  # Reduced wait time
+            current_url = self.driver.current_url
+            logger.debug(f"Current URL: {current_url}")
             
-            # Quick check for authentication indicators
+            if "youtube.com" not in current_url:
+                logger.info("🌐 Navigating to YouTube for authentication check...")
+                self.driver.get("https://www.youtube.com")
+                time.sleep(3)
+            
+            # Log page title and basic info
+            try:
+                page_title = self.driver.title
+                logger.debug(f"📄 Page title: {page_title}")
+            except Exception as e:
+                logger.warning(f"⚠️ Could not get page title: {e}")
+            
+            # Check for authentication indicators with detailed logging
             authentication_indicators = [
-                (By.ID, "avatar-btn"),
-                (By.CSS_SELECTOR, "ytd-topbar-menu-button-renderer"),
-                (By.CSS_SELECTOR, "button[aria-label*='Account menu']"),
+                (By.ID, "avatar-btn", "Avatar button"),
+                (By.CSS_SELECTOR, "ytd-topbar-menu-button-renderer", "Topbar menu button"),
+                (By.CSS_SELECTOR, "button[aria-label*='Account menu']", "Account menu button"),
+                (By.CSS_SELECTOR, "#avatar-btn", "Avatar button (ID)"),
+                (By.CSS_SELECTOR, "yt-img-shadow#avatar", "Avatar image")
             ]
             
-            for by, selector in authentication_indicators:
+            found_indicators = []
+            
+            for by, selector, description in authentication_indicators:
                 try:
                     elements = self.driver.find_elements(by, selector)
                     if elements:
-                        logger.info(f"✅ YouTube: Authentication verified via {selector}")
-                        return True
-                except:
-                    continue
+                        logger.debug(f"✅ Found {len(elements)} {description} element(s)")
+                        found_indicators.append(description)
+                        
+                        # Log element details
+                        for i, element in enumerate(elements[:2]):  # Log first 2 elements
+                            try:
+                                is_displayed = element.is_displayed()
+                                tag_name = element.tag_name
+                                logger.debug(f"   Element {i+1}: {tag_name}, displayed: {is_displayed}")
+                            except Exception as e:
+                                logger.debug(f"   Element {i+1}: Could not get details - {e}")
+                    else:
+                        logger.debug(f"❌ No {description} found")
+                except Exception as e:
+                    logger.debug(f"⚠️ Error checking {description}: {e}")
             
-            # Quick check for sign-in button
+            if found_indicators:
+                logger.info(f"✅ YouTube authentication verified via: {', '.join(found_indicators)}")
+                return True
+            
+            # Check for sign-in button (indicates not authenticated)
+            logger.info("🔍 Checking for sign-in indicators...")
+            
+            sign_in_selectors = [
+                (By.XPATH, "//a[contains(@aria-label, 'Sign in')]", "Sign in link"),
+                (By.CSS_SELECTOR, "a[href*='accounts.google.com']", "Google accounts link"),
+                (By.XPATH, "//button[contains(text(), 'Sign in')]", "Sign in button"),
+                (By.CSS_SELECTOR, "ytd-button-renderer#sign-in-button", "YouTube sign in button")
+            ]
+            
+            sign_in_found = []
+            
+            for by, selector, description in sign_in_selectors:
+                try:
+                    elements = self.driver.find_elements(by, selector)
+                    if elements:
+                        visible_elements = [e for e in elements if e.is_displayed()]
+                        if visible_elements:
+                            logger.warning(f"⚠️ Found visible {description}: {len(visible_elements)} element(s)")
+                            sign_in_found.append(description)
+                        else:
+                            logger.debug(f"Found hidden {description}: {len(elements)} element(s)")
+                except Exception as e:
+                    logger.debug(f"Error checking {description}: {e}")
+            
+            if sign_in_found:
+                logger.warning(f"⚠️ YouTube: Sign-in indicators found - {', '.join(sign_in_found)}")
+                return False
+            
+            # Check page source for authentication clues
             try:
-                sign_in_elements = self.driver.find_elements(By.XPATH, "//a[contains(@aria-label, 'Sign in')]")
-                if sign_in_elements and sign_in_elements[0].is_displayed():
-                    logger.warning("⚠️ YouTube: Sign-in button found - not authenticated")
-                    return False
-            except:
-                pass
+                page_source = self.driver.page_source
+                auth_keywords = ["LOGGED_IN", "SESSION_INDEX", "VISITOR_DATA"]
+                found_keywords = [kw for kw in auth_keywords if kw in page_source]
+                
+                if found_keywords:
+                    logger.info(f"✅ Found authentication keywords in page source: {found_keywords}")
+                    return True
+                else:
+                    logger.debug("No authentication keywords found in page source")
+                    
+            except Exception as e:
+                logger.warning(f"⚠️ Could not check page source: {e}")
             
-            # If no clear indicators, assume authenticated (safer for downloads)
-            logger.info("✅ YouTube: No sign-in indicators found - proceeding with authentication")
+            # If no clear indicators, check cookies
+            try:
+                cookies = self.driver.get_cookies()
+                auth_cookies = [c for c in cookies if c['name'] in ['SAPISID', 'HSID', 'SSID', 'APISID', 'SID']]
+                
+                if auth_cookies:
+                    logger.info(f"✅ Found {len(auth_cookies)} authentication cookies")
+                    for cookie in auth_cookies:
+                        logger.debug(f"   Auth cookie: {cookie['name']} for {cookie['domain']}")
+                    return True
+                else:
+                    logger.warning("⚠️ No authentication cookies found")
+                    
+            except Exception as e:
+                logger.warning(f"⚠️ Could not check cookies: {e}")
+            
+            # Final decision - if no negative indicators, assume authenticated
+            logger.info("✅ No definitive authentication status - proceeding optimistically")
             return True
             
         except Exception as e:
             logger.error(f"❌ YouTube authentication verification failed: {str(e)}")
+            logger.exception("Full authentication verification error traceback:")
             # Return True to allow download attempt even if verification fails
             return True
     
     def extract_youtube_cookies_for_ytdlp(self):
-        """Extract cookies from Chrome session for yt-dlp"""
+        """Extract cookies from Chrome session for yt-dlp with detailed logging"""
+        logger.info("🍪 Extracting cookies from Chrome session for yt-dlp...")
+        
         try:
             if not self.driver:
+                logger.error("❌ No Chrome driver available for cookie extraction")
                 return None
                 
             cookies = self.driver.get_cookies()
+            logger.info(f"📊 Retrieved {len(cookies)} total cookies from Chrome session")
             
             # Convert to Netscape format for yt-dlp
             cookie_lines = ["# Netscape HTTP Cookie File"]
+            cookie_lines.append("# Generated by OneTap Chrome session")
+            cookie_lines.append(f"# Extracted at: {time.strftime('%Y-%m-%d %H:%M:%S')}")
+            
             essential_cookies = 0
+            youtube_cookies = 0
+            google_cookies = 0
+            
+            cookie_stats = {
+                'youtube.com': 0,
+                'google.com': 0,
+                'googlevideo.com': 0,
+                'gstatic.com': 0,
+                'other': 0
+            }
             
             for cookie in cookies:
                 domain = cookie.get('domain', '')
@@ -334,29 +563,76 @@ class YouTubeAuthenticator:
                 secure = cookie.get('secure', False)
                 expires = cookie.get('expiry', 0)
                 
-                if any(keyword in domain.lower() for keyword in ['youtube', 'google', 'googlevideo']):
+                # Skip cookies with empty values
+                if not value or not name:
+                    logger.debug(f"⏭️ Skipping empty cookie: {name}")
+                    continue
+                
+                # Filter for YouTube/Google related cookies
+                if any(keyword in domain.lower() for keyword in ['youtube', 'google', 'googlevideo', 'gstatic']):
                     cookie_line = f"{domain}\tTRUE\t{path}\t{'TRUE' if secure else 'FALSE'}\t{expires}\t{name}\t{value}"
                     cookie_lines.append(cookie_line)
+                    
+                    # Update statistics
+                    if 'youtube' in domain.lower():
+                        youtube_cookies += 1
+                        cookie_stats['youtube.com'] += 1
+                    elif 'google' in domain.lower():
+                        google_cookies += 1
+                        cookie_stats['google.com'] += 1
+                    elif 'googlevideo' in domain.lower():
+                        cookie_stats['googlevideo.com'] += 1
+                    elif 'gstatic' in domain.lower():
+                        cookie_stats['gstatic.com'] += 1
                     
                     # Count essential cookies for authentication
                     if name in ['SAPISID', 'HSID', 'SSID', 'APISID', 'SID', '__Secure-3PAPISID']:
                         essential_cookies += 1
+                        logger.debug(f"✅ Found essential auth cookie: {name} for {domain}")
+                else:
+                    cookie_stats['other'] += 1
+                    logger.debug(f"⏭️ Skipped non-Google cookie: {name} for {domain}")
+            
+            # Log detailed statistics
+            logger.info(f"📊 Cookie extraction statistics:")
+            logger.info(f"   YouTube cookies: {youtube_cookies}")
+            logger.info(f"   Google cookies: {google_cookies}")
+            logger.info(f"   Essential auth cookies: {essential_cookies}")
+            logger.info(f"   Total extracted: {len(cookie_lines)-3}")
+            
+            for domain, count in cookie_stats.items():
+                if count > 0:
+                    logger.debug(f"   {domain}: {count} cookies")
             
             if essential_cookies < 2:
                 logger.warning(f"⚠️ Only {essential_cookies} essential cookies found - authentication may be weak")
             else:
-                logger.info(f"✅ Found {essential_cookies} essential authentication cookies")
+                logger.info(f"✅ Found {essential_cookies} essential authentication cookies - strong auth expected")
             
             # Save temporary cookies for yt-dlp
             temp_cookies_file = os.path.join(os.getcwd(), "temp_youtube_cookies.txt")
-            with open(temp_cookies_file, 'w') as f:
+            with open(temp_cookies_file, 'w', encoding='utf-8') as f:
                 f.write('\n'.join(cookie_lines))
             
-            logger.info(f"✅ Extracted {len(cookie_lines)-1} cookies for yt-dlp")
+            # Verify the written file
+            file_size = os.path.getsize(temp_cookies_file)
+            logger.info(f"💾 Saved cookies to: {temp_cookies_file} ({file_size} bytes)")
+            
+            # Quick validation of the cookie file
+            try:
+                with open(temp_cookies_file, 'r') as f:
+                    validation_lines = f.readlines()
+                valid_cookie_lines = [line for line in validation_lines if line.strip() and not line.startswith('#')]
+                logger.info(f"✅ Cookie file validation: {len(valid_cookie_lines)} valid cookie lines")
+            except Exception as e:
+                logger.warning(f"⚠️ Could not validate cookie file: {e}")
+            
+            logger.info(f"✅ Successfully extracted {len(cookie_lines)-3} cookies for yt-dlp")
             return temp_cookies_file
             
         except Exception as e:
             logger.error(f"❌ Error extracting cookies: {str(e)}")
+            logger.exception("Full cookie extraction error traceback:")
             return None
     
     def cleanup(self):
@@ -881,26 +1157,46 @@ def upload_profile():
         # Clean up ZIP file
         os.remove(zip_path)
         
-        # Verify profile structure
+        # Verify profile structure and ensure essential components
         default_dir = os.path.join(profile_dir, "Default")
         if not os.path.exists(default_dir):
-            # If no Default directory, check if files are in root
+            # If no Default directory, check if files are in root and reorganize
             profile_files = os.listdir(profile_dir)
             if any(f in profile_files for f in ["Preferences", "Login Data", "History"]):
                 # Create Default directory and move files
                 os.makedirs(default_dir, exist_ok=True)
                 for item in profile_files:
-                    if os.path.isfile(os.path.join(profile_dir, item)):
-                        shutil.move(os.path.join(profile_dir, item), os.path.join(default_dir, item))
+                    item_path = os.path.join(profile_dir, item)
+                    if os.path.isfile(item_path):
+                        shutil.move(item_path, os.path.join(default_dir, item))
+                    elif os.path.isdir(item_path) and item in ["Network", "Local Storage", "IndexedDB", "Sessions"]:
+                        shutil.move(item_path, os.path.join(default_dir, item))
+        
+        # Ensure essential directories exist
+        essential_dirs = [
+            os.path.join(default_dir, "Network"),
+            os.path.join(default_dir, "Local Storage"), 
+            os.path.join(default_dir, "IndexedDB"),
+            os.path.join(default_dir, "Sessions")
+        ]
+        
+        for dir_path in essential_dirs:
+            os.makedirs(dir_path, exist_ok=True)
         
         # Count authentication indicators
         auth_files = []
-        if os.path.exists(os.path.join(default_dir, "Login Data")):
-            auth_files.append("Login Data")
-        if os.path.exists(os.path.join(default_dir, "Preferences")):
-            auth_files.append("Preferences")
-        if os.path.exists(os.path.join(default_dir, "Network", "Cookies")):
-            auth_files.append("Cookies")
+        essential_files = [
+            ("Login Data", os.path.join(default_dir, "Login Data")),
+            ("Preferences", os.path.join(default_dir, "Preferences")),
+            ("Network/Cookies", os.path.join(default_dir, "Network", "Cookies")),
+            ("Local Storage", os.path.join(default_dir, "Local Storage")),
+            ("IndexedDB", os.path.join(default_dir, "IndexedDB")),
+            ("Local State", os.path.join(profile_dir, "Local State"))
+        ]
+        
+        for name, path in essential_files:
+            if os.path.exists(path):
+                auth_files.append(name)
         
         # Extract cookies from profile for yt-dlp compatibility
         cookies_extracted = extract_cookies_from_profile(profile_dir)

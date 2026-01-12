@@ -57,28 +57,72 @@ def validate_profile(profile_path):
     return True, "Profile looks good"
 
 def create_profile_zip(profile_path, output_path):
-    """Create ZIP file of Chrome profile"""
+    """Create ZIP file of Chrome profile with all essential components"""
     try:
         logger.info(f"Creating ZIP: {output_path}")
         
+        # Essential directories and files that MUST be included
+        essential_items = [
+            "Default/Cookies",
+            "Default/Network/Cookies", 
+            "Default/Local Storage",
+            "Default/IndexedDB",
+            "Default/Login Data",
+            "Default/Preferences",
+            "Default/Secure Preferences",
+            "Default/Web Data",
+            "Default/History",
+            "Default/Sessions",
+            "Default/Local State",
+            "Local State"
+        ]
+        
         with zipfile.ZipFile(output_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+            # First, ensure all essential items are included
+            for essential_item in essential_items:
+                essential_path = os.path.join(profile_path, essential_item)
+                if os.path.exists(essential_path):
+                    if os.path.isfile(essential_path):
+                        zipf.write(essential_path, essential_item)
+                        logger.info(f"✅ Added essential file: {essential_item}")
+                    elif os.path.isdir(essential_path):
+                        # Add directory contents
+                        for root, dirs, files in os.walk(essential_path):
+                            for file in files:
+                                file_path = os.path.join(root, file)
+                                arcname = os.path.relpath(file_path, profile_path)
+                                try:
+                                    zipf.write(file_path, arcname)
+                                except Exception as e:
+                                    logger.warning(f"Could not add {file}: {e}")
+                        logger.info(f"✅ Added essential directory: {essential_item}")
+                else:
+                    logger.warning(f"⚠️ Missing essential item: {essential_item}")
+            
+            # Then add other profile files, excluding unnecessary ones
             for root, dirs, files in os.walk(profile_path):
-                # Skip unnecessary directories
+                # Skip unnecessary directories but keep essential ones
                 dirs[:] = [d for d in dirs if d not in [
                     'Crashpad', 'ShaderCache', 'GPUCache', 'Code Cache',
-                    'Service Worker', 'DawnCache'
+                    'Service Worker', 'DawnCache', 'DawnWebGPUCache',
+                    'optimization_guide_model_store', 'AutofillStrikeDatabase'
                 ]]
                 
                 for file in files:
                     # Skip unnecessary files
-                    if file.endswith(('.log', '.tmp', '.lock', '.old')):
+                    if file.endswith(('.log', '.tmp', '.lock', '.old', '-journal')):
                         continue
-                    if file.startswith('LOG'):
+                    if file.startswith(('LOG', 'LOCK')):
                         continue
                     
                     file_path = os.path.join(root, file)
+                    arcname = os.path.relpath(file_path, profile_path)
                     
-                    # Skip large files
+                    # Skip if already added as essential item
+                    if arcname in essential_items:
+                        continue
+                    
+                    # Skip very large files
                     try:
                         if os.path.getsize(file_path) > 50 * 1024 * 1024:  # 50MB
                             logger.info(f"Skipping large file: {file}")
@@ -87,7 +131,6 @@ def create_profile_zip(profile_path, output_path):
                         continue
                     
                     # Add to ZIP
-                    arcname = os.path.relpath(file_path, profile_path)
                     try:
                         zipf.write(file_path, arcname)
                     except Exception as e:
@@ -95,6 +138,20 @@ def create_profile_zip(profile_path, output_path):
         
         size_mb = os.path.getsize(output_path) / (1024 * 1024)
         logger.info(f"ZIP created: {size_mb:.1f} MB")
+        
+        # Verify essential components are in the ZIP
+        with zipfile.ZipFile(output_path, 'r') as zipf:
+            zip_contents = zipf.namelist()
+            missing_essential = []
+            for item in essential_items:
+                if not any(path.startswith(item) for path in zip_contents):
+                    missing_essential.append(item)
+            
+            if missing_essential:
+                logger.warning(f"⚠️ ZIP missing essential items: {missing_essential}")
+            else:
+                logger.info("✅ All essential profile components included")
+        
         return True, size_mb
         
     except Exception as e:

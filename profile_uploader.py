@@ -14,7 +14,10 @@ import shutil
 import tempfile
 from pathlib import Path
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(name)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
 class ProfileUploader:
@@ -25,6 +28,7 @@ class ProfileUploader:
         
     def find_chrome_profiles(self):
         """Find available Chrome profiles on the system"""
+        logger.info("🔍 Searching for Chrome profiles...")
         profiles = []
         
         # Local profile directories to check
@@ -36,15 +40,38 @@ class ProfileUploader:
             "chrome_profile"
         ]
         
+        logger.debug(f"Checking {len(local_profiles)} local profile directories...")
+        
         for profile_dir in local_profiles:
+            logger.debug(f"Checking: {profile_dir}")
+            
             if os.path.exists(profile_dir):
-                profiles.append({
-                    "name": profile_dir,
-                    "path": profile_dir,
-                    "type": "local_authenticated"
-                })
+                try:
+                    # Get profile size
+                    profile_size = sum(
+                        os.path.getsize(os.path.join(dirpath, filename))
+                        for dirpath, dirnames, filenames in os.walk(profile_dir)
+                        for filename in filenames
+                    )
+                    size_mb = profile_size / (1024 * 1024)
+                    
+                    logger.info(f"✅ Found local profile: {profile_dir} ({size_mb:.1f} MB)")
+                    
+                    profiles.append({
+                        "name": profile_dir,
+                        "path": profile_dir,
+                        "type": "local_authenticated",
+                        "size_mb": size_mb
+                    })
+                    
+                except Exception as e:
+                    logger.warning(f"⚠️ Error analyzing profile {profile_dir}: {e}")
+            else:
+                logger.debug(f"❌ Not found: {profile_dir}")
         
         # System Chrome profiles (optional)
+        logger.debug("Checking system Chrome profiles...")
+        
         system_chrome_paths = [
             os.path.expanduser("~/AppData/Local/Google/Chrome/User Data"),  # Windows
             os.path.expanduser("~/Library/Application Support/Google/Chrome"),  # macOS
@@ -52,15 +79,36 @@ class ProfileUploader:
         ]
         
         for chrome_path in system_chrome_paths:
+            logger.debug(f"Checking system path: {chrome_path}")
+            
             if os.path.exists(chrome_path):
                 default_profile = os.path.join(chrome_path, "Default")
                 if os.path.exists(default_profile):
-                    profiles.append({
-                        "name": f"System Chrome ({os.path.basename(chrome_path)})",
-                        "path": chrome_path,
-                        "type": "system_chrome"
-                    })
+                    try:
+                        profile_size = sum(
+                            os.path.getsize(os.path.join(dirpath, filename))
+                            for dirpath, dirnames, filenames in os.walk(chrome_path)
+                            for filename in filenames
+                        )
+                        size_mb = profile_size / (1024 * 1024)
+                        
+                        logger.info(f"✅ Found system Chrome: {chrome_path} ({size_mb:.1f} MB)")
+                        
+                        profiles.append({
+                            "name": f"System Chrome ({os.path.basename(chrome_path)})",
+                            "path": chrome_path,
+                            "type": "system_chrome",
+                            "size_mb": size_mb
+                        })
+                        
+                    except Exception as e:
+                        logger.warning(f"⚠️ Error analyzing system profile {chrome_path}: {e}")
+                else:
+                    logger.debug(f"❌ No Default profile in: {chrome_path}")
+            else:
+                logger.debug(f"❌ System path not found: {chrome_path}")
         
+        logger.info(f"📊 Profile search complete: found {len(profiles)} profiles")
         return profiles
     
     def validate_profile(self, profile_path):
@@ -70,38 +118,46 @@ class ProfileUploader:
         if not os.path.exists(default_dir):
             return False, "No Default profile directory found"
         
-        # Check for essential authentication files
-        required_files = [
-            "Preferences",
-            "Login Data"
-        ]
-        
-        optional_files = [
-            os.path.join("Network", "Cookies"),
-            "History",
-            "Web Data"
+        # Check for essential authentication files and directories
+        essential_items = [
+            ("Preferences", "file"),
+            ("Login Data", "file"),
+            ("Network/Cookies", "file"),
+            ("Local Storage", "dir"),
+            ("IndexedDB", "dir")
         ]
         
         missing_required = []
-        for file_path in required_files:
-            full_path = os.path.join(default_dir, file_path)
-            if not os.path.exists(full_path):
-                missing_required.append(file_path)
+        found_items = []
         
-        if missing_required:
-            return False, f"Missing required files: {', '.join(missing_required)}"
+        for item_name, item_type in essential_items:
+            full_path = os.path.join(default_dir, item_name)
+            
+            if item_type == "file" and os.path.isfile(full_path):
+                found_items.append(item_name)
+            elif item_type == "dir" and os.path.isdir(full_path):
+                found_items.append(item_name)
+            else:
+                missing_required.append(item_name)
         
-        # Count optional files
-        found_optional = []
-        for file_path in optional_files:
-            full_path = os.path.join(default_dir, file_path)
-            if os.path.exists(full_path):
-                found_optional.append(file_path)
+        # Check for Local State at profile root
+        local_state_path = os.path.join(profile_path, "Local State")
+        if os.path.exists(local_state_path):
+            found_items.append("Local State")
+        else:
+            missing_required.append("Local State")
         
-        return True, f"Valid profile with {len(found_optional)} optional auth files"
+        # Need at least Login Data and Network/Cookies for authentication
+        critical_items = ["Login Data", "Network/Cookies"]
+        missing_critical = [item for item in critical_items if item in missing_required]
+        
+        if missing_critical:
+            return False, f"Missing critical auth files: {', '.join(missing_critical)}"
+        
+        return True, f"Valid profile with {len(found_items)} auth components: {', '.join(found_items)}"
     
     def create_profile_zip(self, profile_path):
-        """Create a ZIP file of the Chrome profile"""
+        """Create a ZIP file of the Chrome profile with all essential components"""
         try:
             # Create temporary ZIP file
             temp_zip = tempfile.NamedTemporaryFile(delete=False, suffix='.zip')
@@ -109,23 +165,66 @@ class ProfileUploader:
             
             logger.info(f"Creating profile ZIP from: {profile_path}")
             
+            # Essential directories and files that MUST be included
+            essential_items = [
+                "Default/Cookies",
+                "Default/Network/Cookies", 
+                "Default/Local Storage",
+                "Default/IndexedDB",
+                "Default/Login Data",
+                "Default/Preferences",
+                "Default/Secure Preferences",
+                "Default/Web Data",
+                "Default/History",
+                "Default/Sessions",
+                "Local State"
+            ]
+            
             with zipfile.ZipFile(temp_zip.name, 'w', zipfile.ZIP_DEFLATED) as zipf:
-                # Walk through profile directory
+                # First, ensure all essential items are included
+                essential_added = []
+                for essential_item in essential_items:
+                    essential_path = os.path.join(profile_path, essential_item)
+                    if os.path.exists(essential_path):
+                        if os.path.isfile(essential_path):
+                            zipf.write(essential_path, essential_item)
+                            essential_added.append(essential_item)
+                        elif os.path.isdir(essential_path):
+                            # Add directory contents
+                            for root, dirs, files in os.walk(essential_path):
+                                for file in files:
+                                    file_path = os.path.join(root, file)
+                                    arcname = os.path.relpath(file_path, profile_path)
+                                    try:
+                                        zipf.write(file_path, arcname)
+                                    except Exception as e:
+                                        logger.warning(f"Could not add {file}: {e}")
+                            essential_added.append(essential_item)
+                
+                logger.info(f"✅ Added {len(essential_added)} essential components")
+                
+                # Then add other profile files, excluding unnecessary ones
                 for root, dirs, files in os.walk(profile_path):
                     # Skip some unnecessary directories to reduce size
                     dirs[:] = [d for d in dirs if d not in [
                         'Crashpad', 'ShaderCache', 'GPUCache', 'Code Cache',
-                        'Service Worker', 'DawnCache', 'optimization_guide_model_store'
+                        'Service Worker', 'DawnCache', 'DawnWebGPUCache', 'optimization_guide_model_store',
+                        'AutofillStrikeDatabase', 'BudgetDatabase', 'commerce_subscription_db'
                     ]]
                     
                     for file in files:
                         # Skip large unnecessary files
-                        if file.endswith(('.log', '.tmp', '.lock', '.old')):
+                        if file.endswith(('.log', '.tmp', '.lock', '.old', '-journal')):
                             continue
-                        if file.startswith('LOG'):
+                        if file.startswith(('LOG', 'LOCK')):
                             continue
                             
                         file_path = os.path.join(root, file)
+                        arcname = os.path.relpath(file_path, profile_path)
+                        
+                        # Skip if already added as essential item
+                        if any(arcname.startswith(essential) for essential in essential_items):
+                            continue
                         
                         # Skip very large files (>50MB)
                         try:
@@ -136,7 +235,6 @@ class ProfileUploader:
                             continue
                         
                         # Add to ZIP with relative path
-                        arcname = os.path.relpath(file_path, profile_path)
                         try:
                             zipf.write(file_path, arcname)
                         except Exception as e:
@@ -146,6 +244,19 @@ class ProfileUploader:
             # Check ZIP size
             zip_size = os.path.getsize(temp_zip.name)
             zip_size_mb = zip_size / (1024 * 1024)
+            
+            # Verify essential components are in the ZIP
+            with zipfile.ZipFile(temp_zip.name, 'r') as zipf:
+                zip_contents = zipf.namelist()
+                missing_essential = []
+                for item in essential_items:
+                    if not any(path.startswith(item) for path in zip_contents):
+                        missing_essential.append(item)
+                
+                if missing_essential:
+                    logger.warning(f"⚠️ ZIP missing essential items: {missing_essential}")
+                else:
+                    logger.info("✅ All essential profile components included")
             
             logger.info(f"Profile ZIP created: {zip_size_mb:.1f} MB")
             
