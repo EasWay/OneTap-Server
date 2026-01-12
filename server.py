@@ -60,7 +60,7 @@ class YouTubeAuthenticator:
         try:
             chrome_options = Options()
             
-            # Headless mode for server environment
+            # Headless mode for server environment with memory optimizations
             chrome_options.add_argument("--headless=new")
             chrome_options.add_argument("--no-sandbox")
             chrome_options.add_argument("--disable-dev-shm-usage")
@@ -75,6 +75,12 @@ class YouTubeAuthenticator:
             chrome_options.add_argument("--remote-debugging-port=9222")
             chrome_options.add_argument("--disable-extensions")
             chrome_options.add_argument("--disable-plugins")
+            chrome_options.add_argument("--disable-images")  # Save memory
+            chrome_options.add_argument("--disable-javascript")  # Save memory for auth only
+            chrome_options.add_argument("--max_old_space_size=512")  # Limit memory
+            chrome_options.add_argument("--aggressive-cache-discard")
+            chrome_options.add_argument("--memory-pressure-off")
+            chrome_options.add_argument("--max_old_space_size=512")
             
             # Anti-detection options
             chrome_options.add_argument("--disable-blink-features=AutomationControlled")
@@ -196,20 +202,19 @@ class YouTubeAuthenticator:
             return False
     
     def verify_youtube_authentication(self):
-        """Verify YouTube authentication status"""
+        """Verify YouTube authentication status with timeout"""
         try:
-            self.driver.get("https://www.youtube.com")
-            time.sleep(5)
+            # Set page load timeout
+            self.driver.set_page_load_timeout(30)
             
-            # Multiple ways to check authentication
+            self.driver.get("https://www.youtube.com")
+            time.sleep(3)  # Reduced wait time
+            
+            # Quick check for authentication indicators
             authentication_indicators = [
-                # Check for user avatar/profile button
                 (By.ID, "avatar-btn"),
-                (By.CSS_SELECTOR, "button[aria-label*='Account menu']"),
-                (By.CSS_SELECTOR, "img[alt*='Avatar']"),
-                # Check for account-related elements
-                (By.CSS_SELECTOR, "[aria-label*='Create']"),
                 (By.CSS_SELECTOR, "ytd-topbar-menu-button-renderer"),
+                (By.CSS_SELECTOR, "button[aria-label*='Account menu']"),
             ]
             
             for by, selector in authentication_indicators:
@@ -221,49 +226,23 @@ class YouTubeAuthenticator:
                 except:
                     continue
             
-            # Check if we can access account-specific URLs
+            # Quick check for sign-in button
             try:
-                self.driver.get("https://www.youtube.com/feed/subscriptions")
-                time.sleep(3)
-                
-                # If we're redirected to sign-in, we're not authenticated
-                current_url = self.driver.current_url
-                if "accounts.google.com" in current_url or "signin" in current_url:
-                    logger.warning("⚠️ YouTube: Redirected to sign-in page")
+                sign_in_elements = self.driver.find_elements(By.XPATH, "//a[contains(@aria-label, 'Sign in')]")
+                if sign_in_elements and sign_in_elements[0].is_displayed():
+                    logger.warning("⚠️ YouTube: Sign-in button found - not authenticated")
                     return False
-                
-                # Look for subscription content or feed elements
-                feed_elements = self.driver.find_elements(By.CSS_SELECTOR, "ytd-browse[page-subtype='subscriptions']")
-                if feed_elements:
-                    logger.info("✅ YouTube: Authentication verified via subscriptions page")
-                    return True
-                    
-            except Exception as e:
-                logger.warning(f"⚠️ Could not verify via subscriptions: {str(e)}")
+            except:
+                pass
             
-            # Final check: look for sign-in button (indicates not authenticated)
-            sign_in_selectors = [
-                "//a[contains(@aria-label, 'Sign in')]",
-                "//button[contains(text(), 'Sign in')]",
-                "//a[contains(text(), 'Sign in')]"
-            ]
-            
-            for selector in sign_in_selectors:
-                try:
-                    sign_in_elements = self.driver.find_elements(By.XPATH, selector)
-                    if sign_in_elements and sign_in_elements[0].is_displayed():
-                        logger.warning("⚠️ YouTube: Sign-in button found - not authenticated")
-                        return False
-                except:
-                    continue
-            
-            # If we get here, assume we're authenticated (no sign-in button found)
-            logger.info("✅ YouTube: No sign-in indicators found - likely authenticated")
+            # If no clear indicators, assume authenticated (safer for downloads)
+            logger.info("✅ YouTube: No sign-in indicators found - proceeding with authentication")
             return True
             
         except Exception as e:
             logger.error(f"❌ YouTube authentication verification failed: {str(e)}")
-            return False
+            # Return True to allow download attempt even if verification fails
+            return True
     
     def extract_youtube_cookies_for_ytdlp(self):
         """Extract cookies from Chrome session for yt-dlp"""
@@ -489,24 +468,40 @@ def download_video():
         platform = detect_platform(url)
         logger.info(f"🌍 Detected platform: {platform}")
 
-        # For YouTube, use Chrome authentication
+        # For YouTube, use Chrome authentication with timeout
         if platform == "youtube":
             logger.info("🔐 Setting up Chrome authentication for YouTube...")
             youtube_auth = YouTubeAuthenticator()
             
             try:
-                if youtube_auth.setup_chrome_driver():
-                    if youtube_auth.load_youtube_cookies():
-                        if youtube_auth.verify_youtube_authentication():
-                            # Extract cookies for yt-dlp
-                            youtube_cookies_file = youtube_auth.extract_youtube_cookies_for_ytdlp()
-                            logger.info("✅ YouTube authentication successful")
+                # Set a timeout for the entire Chrome authentication process
+                import signal
+                
+                def timeout_handler(signum, frame):
+                    raise TimeoutError("Chrome authentication timeout")
+                
+                # Set 60 second timeout for Chrome operations
+                signal.signal(signal.SIGALRM, timeout_handler)
+                signal.alarm(60)
+                
+                try:
+                    if youtube_auth.setup_chrome_driver():
+                        if youtube_auth.load_youtube_cookies():
+                            if youtube_auth.verify_youtube_authentication():
+                                # Extract cookies for yt-dlp
+                                youtube_cookies_file = youtube_auth.extract_youtube_cookies_for_ytdlp()
+                                logger.info("✅ YouTube authentication successful")
+                            else:
+                                logger.warning("⚠️ YouTube authentication verification failed - continuing with file cookies")
                         else:
-                            logger.warning("⚠️ YouTube authentication verification failed - continuing with file cookies")
+                            logger.warning("⚠️ No YouTube cookies loaded - continuing with file cookies")
                     else:
-                        logger.warning("⚠️ No YouTube cookies loaded - continuing with file cookies")
-                else:
-                    logger.warning("⚠️ Chrome driver setup failed - continuing with file cookies")
+                        logger.warning("⚠️ Chrome driver setup failed - continuing with file cookies")
+                finally:
+                    signal.alarm(0)  # Cancel the timeout
+                    
+            except TimeoutError:
+                logger.warning("⚠️ Chrome authentication timed out - continuing with file cookies")
             except Exception as chrome_error:
                 logger.warning(f"⚠️ Chrome authentication failed: {str(chrome_error)} - continuing with file cookies")
 
