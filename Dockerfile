@@ -16,9 +16,6 @@ RUN apt-get update && apt-get install -y \
     ffmpeg \
     ca-certificates \
     xvfb \
-    libxss1 \
-    libappindicator1 \
-    libindicator7 \
     libasound2 \
     libatk1.0-0 \
     libc6 \
@@ -28,8 +25,6 @@ RUN apt-get update && apt-get install -y \
     libexpat1 \
     libfontconfig1 \
     libgcc1 \
-    libgconf-2-4 \
-    libgdk-pixbuf2.0-0 \
     libglib2.0-0 \
     libgtk-3-0 \
     libnspr4 \
@@ -51,6 +46,7 @@ RUN apt-get update && apt-get install -y \
     libxss1 \
     libxtst6 \
     && rm -rf /var/lib/apt/lists/*
+
 
 # Install Chrome for Testing + matching ChromeDriver (deterministic versions)
 RUN wget -q https://storage.googleapis.com/chrome-for-testing-public/122.0.6261.69/linux64/chrome-linux64.zip \
