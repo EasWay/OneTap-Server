@@ -1,314 +1,184 @@
-#!/usr/bin/env python3
-"""
-OneTap Server - Production Version
-Works both locally and on Render with Selenium + Chrome
-"""
-
 import os
-import json
 import uuid
+import yt_dlp
 import logging
-import socket
-import time
-import tempfile
 import shutil
-import sqlite3
-import base64
 from flask import Flask, request, jsonify, send_from_directory
-from flask_cors import CORS
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException, NoSuchElementException
-import requests
-from urllib.parse import urlparse, parse_qs
-from secure_auth_manager import SecureAuthManager
+from urllib.parse import urlparse
 
 # Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
-# Initialize Flask app
 app = Flask(__name__)
-CORS(app)
 
-# Configuration
+# --- CONFIGURATION ---
 DOWNLOAD_DIR = os.path.join(os.getcwd(), "downloads")
-PROFILE_DATA_DIR = os.path.join(os.getcwd(), "profile_data")
-COOKIES_FILE = os.path.join(os.getcwd(), "render_cookies.txt")
-
-# Ensure directories exist
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
-os.makedirs(PROFILE_DATA_DIR, exist_ok=True)
 
-# Detect environment
-IS_RENDER = os.environ.get('RENDER') is not None
-IS_LOCAL = not IS_RENDER
+# Separate cookie files
+GOOGLE_COOKIES_FILE = os.path.join(os.getcwd(), "google_cookies.txt")
+SOCIAL_COOKIES_FILE = os.path.join(os.getcwd(), "cookies.txt")
 
-class OneTapDownloader:
-    """Download YouTube videos using Chrome with maximum bot resistance"""
-    
-    def __init__(self):
-        self.driver = None
-        self.cookies_loaded = False
-        
-    def setup_driver(self):
-        """Setup Chrome driver for current environment"""
-        try:
-            chrome_options = Options()
-            
-            if IS_RENDER:
-                # Render-specific Chrome options
-                chrome_options.add_argument("--headless=new")
-                chrome_options.add_argument("--no-sandbox")
-                chrome_options.add_argument("--disable-dev-shm-usage")
-                chrome_options.add_argument("--disable-gpu")
-                chrome_options.add_argument("--disable-software-rasterizer")
-                chrome_options.add_argument("--disable-background-timer-throttling")
-                chrome_options.add_argument("--disable-backgrounding-occluded-windows")
-                chrome_options.add_argument("--disable-renderer-backgrounding")
-                chrome_options.add_argument("--disable-features=TranslateUI")
-                chrome_options.add_argument("--disable-ipc-flooding-protection")
-                chrome_options.add_argument("--memory-pressure-off")
-                chrome_options.add_argument("--max_old_space_size=4096")
-                chrome_options.add_argument("--remote-debugging-port=9222")
-                chrome_options.add_argument("--disable-extensions")
-                chrome_options.add_argument("--disable-plugins")
-                chrome_options.add_argument("--disable-images")
-                chrome_options.add_argument("--disable-javascript")
-                
-                # Try multiple Chrome binary locations for Render
-                possible_chrome_paths = [
-                    "/usr/bin/google-chrome",
-                    "/usr/bin/google-chrome-stable", 
-                    "/usr/bin/chromium-browser",
-                    "/usr/bin/chromium",
-                    "/opt/google/chrome/chrome"
-                ]
-                
-                chrome_binary = None
-                for path in possible_chrome_paths:
-                    if os.path.exists(path):
-                        chrome_binary = path
-                        break
-                
-                if chrome_binary:
-                    chrome_options.binary_location = chrome_binary
-                    logger.info(f"🔍 Using Chrome binary: {chrome_binary}")
-                else:
-                    logger.warning("⚠️ No Chrome binary found, using default")
-            else:
-                # Local development options
-                chrome_options.add_argument("--headless=new")
-                chrome_options.add_argument("--no-sandbox")
-                chrome_options.add_argument("--disable-dev-shm-usage")
-            
-            # Common anti-detection options
-            chrome_options.add_argument("--disable-blink-features=AutomationControlled")
-            chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
-            chrome_options.add_experimental_option('useAutomationExtension', False)
-            chrome_options.add_argument("--window-size=1920,1080")
-            chrome_options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-            
-            # Create driver with better error handling
-            if IS_RENDER:
-                # Try multiple chromedriver locations for Render
-                possible_driver_paths = [
-                    "/usr/bin/chromedriver",
-                    "/usr/local/bin/chromedriver",
-                    "/opt/chromedriver/chromedriver"
-                ]
-                
-                driver_path = None
-                for path in possible_driver_paths:
-                    if os.path.exists(path):
-                        driver_path = path
-                        break
-                
-                if driver_path:
-                    service = Service(driver_path)
-                    logger.info(f"🔍 Using chromedriver: {driver_path}")
-                    self.driver = webdriver.Chrome(service=service, options=chrome_options)
-                else:
-                    logger.info("🔍 Using default chromedriver location")
-                    self.driver = webdriver.Chrome(options=chrome_options)
-            else:
-                self.driver = webdriver.Chrome(options=chrome_options)
-            
-            # Execute anti-detection scripts
-            self.driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-            self.driver.execute_script("Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]})")
-            self.driver.execute_script("Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']})")
-            
-            logger.info(f"✅ Chrome driver initialized ({'Render' if IS_RENDER else 'Local'} mode)")
-            return True
-            
-        except Exception as e:
-            logger.error(f"❌ Error setting up Chrome driver: {str(e)}")
-            logger.info("💡 Trying fallback yt-dlp only mode...")
-            return False
-    
-    def load_authenticated_cookies(self):
-        """Load cookies from the authenticated profile"""
-        try:
-            # Try render cookies first, then local profile
-            cookies_sources = []
-            
-            if IS_RENDER and os.path.exists(COOKIES_FILE):
-                cookies_sources.append(COOKIES_FILE)
-            
-            # Local profile cookies
-            local_profile = os.path.join(os.getcwd(), "authenticated_youtube_session")
-            local_cookies = os.path.join(os.getcwd(), "google_cookies.txt")
-            
-            if os.path.exists(local_cookies):
-                cookies_sources.append(local_cookies)
-            
-            if not cookies_sources:
-                logger.warning("⚠️ No cookies found")
-                return False
-            
-            # Navigate to YouTube first
-            self.driver.get("https://www.youtube.com")
-            time.sleep(2)
-            
-            # Load cookies from the first available source
-            cookies_file = cookies_sources[0]
-            logger.info(f"🍪 Loading cookies from: {cookies_file}")
-            
-            with open(cookies_file, 'r') as f:
-                lines = f.readlines()
-            
-            cookies_loaded = 0
-            for line in lines:
-                line = line.strip()
-                if line and not line.startswith('#'):
-                    try:
-                        parts = line.split('\t')
-                        if len(parts) >= 7:
-                            domain = parts[0].lstrip('.')
-                            name = parts[5]
-                            value = parts[6]
-                            
-                            # Add cookie to driver
-                            cookie_dict = {
-                                'name': name,
-                                'value': value,
-                                'domain': domain
-                            }
-                            
-                            self.driver.add_cookie(cookie_dict)
-                            cookies_loaded += 1
-                            
-                    except Exception as e:
-                        logger.warning(f"⚠️ Failed to load cookie: {str(e)}")
-                        continue
-            
-            logger.info(f"✅ Loaded {cookies_loaded} cookies")
-            self.cookies_loaded = cookies_loaded > 0
-            
-            # Refresh page to apply cookies
-            if self.cookies_loaded:
-                self.driver.refresh()
-                time.sleep(3)
-            
-            return self.cookies_loaded
-            
-        except Exception as e:
-            logger.error(f"❌ Error loading cookies: {str(e)}")
-            return False
-    
-    def extract_video_info_fallback(self, url):
-        """Extract video information using yt-dlp only (fallback when Selenium fails)"""
-        try:
-            import yt_dlp
-            
-            logger.info(f"🔍 Extracting video info using yt-dlp fallback from: {url}")
-            
-            # yt-dlp options for info extraction only
-            ydl_opts = {
-                "quiet": True,
-                "no_warnings": True,
-                "extract_flat": False
+# Exact UA for session consistency
+EXACT_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.7499.192 Safari/537.36"
+
+def get_deno_path():
+    """Aggressively locate Deno for YouTube challenges"""
+    paths = [
+        shutil.which("deno"),
+        os.path.expanduser("~/.deno/bin/deno"),
+        "/opt/render/.deno/bin/deno",
+        "/usr/local/bin/deno",
+        "/root/.deno/bin/deno"
+    ]
+    for p in paths:
+        if p and os.path.exists(p):
+            return p
+    return "deno"
+
+def detect_platform(url):
+    domain = urlparse(url).netloc.lower()
+    if "youtube" in domain or "youtu.be" in domain:
+        return "youtube"
+    elif "tiktok" in domain:
+        return "tiktok"
+    elif "facebook" in domain or "fb.watch" in domain:
+        return "facebook"
+    elif "instagram" in domain:
+        return "instagram"
+    elif "twitter" in domain or "x.com" in domain:
+        return "twitter"
+    return "generic"
+
+@app.route("/update_cookies", methods=["POST"])
+def update_social_cookies():
+    try:
+        if 'file' not in request.files: return jsonify({"error": "No file"}), 400
+        file = request.files['file']
+        file.save(SOCIAL_COOKIES_FILE)
+        logger.info(f"🍪 Social cookies updated ({os.path.getsize(SOCIAL_COOKIES_FILE)} bytes)")
+        return jsonify({"status": "success", "message": "Social cookies updated"})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/update_google_cookies", methods=["POST"])
+def update_google_cookies():
+    try:
+        if 'file' not in request.files: return jsonify({"error": "No file"}), 400
+        file = request.files['file']
+        file.save(GOOGLE_COOKIES_FILE)
+        logger.info(f"🍪 Google cookies updated ({os.path.getsize(GOOGLE_COOKIES_FILE)} bytes)")
+        return jsonify({"status": "success", "message": "Google cookies updated"})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/download", methods=["POST"])
+def download_video():
+    logger.info("🚀 Download request received")
+    try:
+        data = request.get_json()
+        url = data.get("url")
+        if not url: return jsonify({"error": "No URL"}), 400
+
+        platform = detect_platform(url)
+        logger.info(f"🌍 Detected platform: {platform}")
+
+        uid = str(uuid.uuid4())
+        # Base Options
+        ydl_opts = {
+            "outtmpl": os.path.join(DOWNLOAD_DIR, f"{uid}.%(ext)s"),
+            "user_agent": EXACT_UA,
+            "quiet": False,
+            "no_warnings": False,
+            "format": "bestvideo[vcodec^=avc1]+bestaudio[ext=m4a]/best[ext=mp4]/best",
+            "merge_output_format": "mp4",
+            "http_headers": {
+                "User-Agent": EXACT_UA,
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "en-us,en;q=0.5",
             }
+        }
+
+        # --- PLATFORM SPECIFIC STRATEGIES ---
+        if platform == "youtube":
+            deno_exe = get_deno_path()
+            ydl_opts["js_engine"] = "deno"
+            ydl_opts["js_runtimes"] = [deno_exe]
+            ydl_opts["remote_components"] = "ejs:github"
             
-            # Add cookies if available
-            cookies_sources = []
-            if IS_RENDER and os.path.exists(COOKIES_FILE):
-                cookies_sources.append(COOKIES_FILE)
-            
-            local_cookies = os.path.join(os.getcwd(), "google_cookies.txt")
-            if os.path.exists(local_cookies):
-                cookies_sources.append(local_cookies)
-            
-            if cookies_sources:
-                ydl_opts["cookiefile"] = cookies_sources[0]
-                logger.info(f"🍪 Using cookies from: {cookies_sources[0]}")
-            
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url, download=False)
-                
-                title = info.get('title', 'Unknown')
-                duration = info.get('duration', 0)
-                video_id = info.get('id', self.extract_video_id(url))
-                
-                logger.info(f"📺 Video title: {title}")
-                logger.info(f"⏱️ Video duration: {duration}s")
-                
-                return {
-                    "title": title,
-                    "duration": duration,
-                    "video_id": video_id,
-                    "original_url": url,
-                    "cookies_used": len(cookies_sources) > 0,
-                    "method": "yt-dlp_fallback"
+            if os.path.exists(GOOGLE_COOKIES_FILE):
+                logger.info("🍪 Using Google cookies")
+                ydl_opts["cookiefile"] = GOOGLE_COOKIES_FILE
+                ydl_opts["extractor_args"] = {
+                    "youtube": {
+                        "player_client": ["ios", "web"], 
+                        "remote_components": ["ejs:github"]
+                    }
                 }
-                
-        except Exception as e:
-            logger.error(f"❌ Error extracting video info with yt-dlp: {str(e)}")
-            # Return basic info from URL
-            video_id = self.extract_video_id(url)
-            return {
-                "title": f"Video {video_id}" if video_id else "Unknown Video",
-                "duration": 0,
-                "video_id": video_id,
-                "original_url": url,
-                "cookies_used": False,
-                "method": "basic_fallback"
-            }
+            else:
+                ydl_opts["extractor_args"] = {"youtube": {"player_client": ["ios", "web"]}}
 
-    def extract_video_info(self, url):
-        """Extract video information using Selenium"""
-        try:
-            logger.info(f"🔍 Extracting video info from: {url}")
+        elif platform in ["facebook", "instagram"]:
+            if os.path.exists(SOCIAL_COOKIES_FILE):
+                logger.info(f"🍪 Using Social cookies for {platform}")
+                ydl_opts["cookiefile"] = SOCIAL_COOKIES_FILE
             
-            # Load cookies if not already loaded
-            if not self.cookies_loaded:
-                self.load_authenticated_cookies()
+            if platform == "instagram":
+                ydl_opts["format"] = "best" 
+
+        elif platform == "tiktok":
+            ydl_opts["format"] = "best[ext=mp4]/best"
+
+        # --- EXECUTION ---
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            if platform == "youtube":
+                logger.info(f"Using Deno at: {get_deno_path()}")
             
-            # Navigate to the video
-            self.driver.get(url)
-            time.sleep(5)
+            info = ydl.extract_info(url, download=True)
+            filename = os.path.basename(ydl.prepare_filename(info))
             
-            # Wait for page to load
-            try:
-                WebDriverWait(self.driver, 15).until(
-                    lambda driver: driver.execute_script("return document.readyState") == "complete"
-                )
-            except TimeoutException:
-                logger.warning("⚠️ Page load timeout, continuing...")
+        base_url = request.host_url.rstrip("/").replace("http://", "https://")
+        
+        return jsonify({
+            "status": "success",
+            "download_url": f"{base_url}/files/{filename}",
+            "filename": filename,
+            "platform": platform,
+            "title": info.get("title", "Unknown")
+        })
+
+    except Exception as e:
+        error_msg = str(e)
+        logger.error(f"❌ Download failed: {error_msg}")
+        
+        if "confirm you're not a bot" in error_msg.lower():
+            return jsonify({"error": "Bot check triggered. Refresh cookies."}), 403
+        if "login" in error_msg.lower():
+            return jsonify({"error": f"Login required for {platform}. Upload cookies."}), 401
             
-            # Extract video title
-            title = "Unknown"
-            title_selectors = [
-                "h1.ytd-video-primary-info-renderer",
-                "h1 yt-formatted-string",
-                "h1.style-scope.ytd-video-primary-info-renderer",
-                "meta[property='og:title']"
-            ]
+        return jsonify({"error": error_msg}), 500
+
+@app.route("/files/<filename>")
+def files(filename):
+    return send_from_directory(DOWNLOAD_DIR, filename, as_attachment=True)
+
+@app.route("/version", methods=["GET"])
+def check_version():
+    return jsonify({
+        "latest_version": 4, 
+        "status": "active", 
+        "features": ["youtube", "tiktok", "facebook", "instagram", "twitter"]
+    })
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 10000))
+    logger.info(f"🛠️ OneTap Multi-Platform Server starting on port {port}")
+    # Fixed the syntax error here:
+    app.run(host="0.0.0.0", port=port, threaded=True)
             
             for selector in title_selectors:
                 try:
