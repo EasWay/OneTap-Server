@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 OneTap Multi-Platform Video Downloader Server
-Supports YouTube, TikTok, Facebook, Instagram, Twitter/X
+Supports YouTube, TikTok, Facebook, Instagram, Twitter/X with Chrome/Selenium for YouTube authentication
 """
 
 import os
@@ -10,9 +10,17 @@ import yt_dlp
 import logging
 import shutil
 import socket
+import time
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 from urllib.parse import urlparse
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import TimeoutException, NoSuchElementException
 
 # Configure logging
 logging.basicConfig(
@@ -38,7 +46,217 @@ RENDER_COOKIES_FILE = os.path.join(os.getcwd(), "render_cookies.txt")
 IS_RENDER = os.environ.get('RENDER') is not None
 
 # User agent for consistency
-EXACT_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+EXACT_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+
+class YouTubeAuthenticator:
+    """Handle YouTube authentication using Chrome/Selenium"""
+    
+    def __init__(self):
+        self.driver = None
+        self.cookies_loaded = False
+        
+    def setup_chrome_driver(self):
+        """Setup Chrome driver for YouTube authentication"""
+        try:
+            chrome_options = Options()
+            
+            # Headless mode for server environment
+            chrome_options.add_argument("--headless=new")
+            chrome_options.add_argument("--no-sandbox")
+            chrome_options.add_argument("--disable-dev-shm-usage")
+            chrome_options.add_argument("--disable-gpu")
+            chrome_options.add_argument("--disable-software-rasterizer")
+            chrome_options.add_argument("--disable-background-timer-throttling")
+            chrome_options.add_argument("--disable-backgrounding-occluded-windows")
+            chrome_options.add_argument("--disable-renderer-backgrounding")
+            chrome_options.add_argument("--disable-features=TranslateUI")
+            chrome_options.add_argument("--disable-ipc-flooding-protection")
+            chrome_options.add_argument("--memory-pressure-off")
+            chrome_options.add_argument("--remote-debugging-port=9222")
+            chrome_options.add_argument("--disable-extensions")
+            chrome_options.add_argument("--disable-plugins")
+            
+            # Anti-detection options
+            chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+            chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+            chrome_options.add_experimental_option('useAutomationExtension', False)
+            chrome_options.add_argument("--window-size=1920,1080")
+            chrome_options.add_argument(f"--user-agent={EXACT_UA}")
+            
+            # Try to use the installed Chrome
+            chrome_paths = [
+                "/usr/bin/google-chrome",
+                "/opt/chrome-linux64/chrome"
+            ]
+            
+            for chrome_path in chrome_paths:
+                if os.path.exists(chrome_path):
+                    chrome_options.binary_location = chrome_path
+                    logger.info(f"🔍 Using Chrome binary: {chrome_path}")
+                    break
+            
+            # Try to use the installed ChromeDriver
+            chromedriver_paths = [
+                "/usr/bin/chromedriver",
+                "/opt/chromedriver-linux64/chromedriver"
+            ]
+            
+            service = None
+            for driver_path in chromedriver_paths:
+                if os.path.exists(driver_path):
+                    service = Service(driver_path)
+                    logger.info(f"🔍 Using ChromeDriver: {driver_path}")
+                    break
+            
+            if service:
+                self.driver = webdriver.Chrome(service=service, options=chrome_options)
+            else:
+                self.driver = webdriver.Chrome(options=chrome_options)
+            
+            # Execute anti-detection scripts
+            self.driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+            self.driver.execute_script("Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]})")
+            self.driver.execute_script("Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']})")
+            
+            logger.info("✅ Chrome driver initialized for YouTube authentication")
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ Error setting up Chrome driver: {str(e)}")
+            return False
+    
+    def load_youtube_cookies(self):
+        """Load YouTube cookies into Chrome"""
+        try:
+            # Find the best cookie source
+            cookie_sources = []
+            
+            if os.path.exists(GOOGLE_COOKIES_FILE):
+                cookie_sources.append(GOOGLE_COOKIES_FILE)
+            if os.path.exists(RENDER_COOKIES_FILE):
+                cookie_sources.append(RENDER_COOKIES_FILE)
+            
+            if not cookie_sources:
+                logger.warning("⚠️ No YouTube cookies found")
+                return False
+            
+            # Navigate to YouTube first
+            self.driver.get("https://www.youtube.com")
+            time.sleep(2)
+            
+            # Load cookies from the first available source
+            cookies_file = cookie_sources[0]
+            logger.info(f"🍪 Loading YouTube cookies from: {cookies_file}")
+            
+            with open(cookies_file, 'r') as f:
+                lines = f.readlines()
+            
+            cookies_loaded = 0
+            for line in lines:
+                line = line.strip()
+                if line and not line.startswith('#'):
+                    try:
+                        parts = line.split('\t')
+                        if len(parts) >= 7:
+                            domain = parts[0].lstrip('.')
+                            name = parts[5]
+                            value = parts[6]
+                            
+                            # Only load YouTube/Google cookies
+                            if 'youtube' in domain or 'google' in domain:
+                                cookie_dict = {
+                                    'name': name,
+                                    'value': value,
+                                    'domain': domain
+                                }
+                                
+                                self.driver.add_cookie(cookie_dict)
+                                cookies_loaded += 1
+                                
+                    except Exception as e:
+                        logger.warning(f"⚠️ Failed to load cookie: {str(e)}")
+                        continue
+            
+            logger.info(f"✅ Loaded {cookies_loaded} YouTube cookies")
+            self.cookies_loaded = cookies_loaded > 0
+            
+            # Refresh page to apply cookies
+            if self.cookies_loaded:
+                self.driver.refresh()
+                time.sleep(3)
+            
+            return self.cookies_loaded
+            
+        except Exception as e:
+            logger.error(f"❌ Error loading YouTube cookies: {str(e)}")
+            return False
+    
+    def verify_youtube_authentication(self):
+        """Verify YouTube authentication status"""
+        try:
+            self.driver.get("https://www.youtube.com")
+            time.sleep(3)
+            
+            # Check for sign-in button (if present, not authenticated)
+            sign_in_elements = self.driver.find_elements(By.XPATH, "//a[contains(@aria-label, 'Sign in')]")
+            
+            if sign_in_elements:
+                logger.warning("⚠️ YouTube: User not authenticated")
+                return False
+            
+            # Check for user avatar or account menu
+            avatar_elements = self.driver.find_elements(By.ID, "avatar-btn")
+            if avatar_elements:
+                logger.info("✅ YouTube: User is authenticated")
+                return True
+                
+            return False
+            
+        except Exception as e:
+            logger.error(f"❌ YouTube authentication verification failed: {str(e)}")
+            return False
+    
+    def extract_youtube_cookies_for_ytdlp(self):
+        """Extract cookies from Chrome session for yt-dlp"""
+        try:
+            if not self.driver:
+                return None
+                
+            cookies = self.driver.get_cookies()
+            
+            # Convert to Netscape format for yt-dlp
+            cookie_lines = ["# Netscape HTTP Cookie File"]
+            for cookie in cookies:
+                domain = cookie.get('domain', '')
+                name = cookie.get('name', '')
+                value = cookie.get('value', '')
+                path = cookie.get('path', '/')
+                secure = cookie.get('secure', False)
+                expires = cookie.get('expiry', 0)
+                
+                if 'youtube' in domain or 'google' in domain:
+                    cookie_line = f"{domain}\tTRUE\t{path}\t{'TRUE' if secure else 'FALSE'}\t{expires}\t{name}\t{value}"
+                    cookie_lines.append(cookie_line)
+            
+            # Save temporary cookies for yt-dlp
+            temp_cookies_file = os.path.join(os.getcwd(), "temp_youtube_cookies.txt")
+            with open(temp_cookies_file, 'w') as f:
+                f.write('\n'.join(cookie_lines))
+            
+            logger.info(f"✅ Extracted {len(cookie_lines)-1} cookies for yt-dlp")
+            return temp_cookies_file
+            
+        except Exception as e:
+            logger.error(f"❌ Error extracting cookies: {str(e)}")
+            return None
+    
+    def cleanup(self):
+        """Clean up Chrome driver"""
+        if self.driver:
+            try:
+                self.driver.quit()
+            except:
+                pass
 
 def get_deno_path():
     """Locate Deno for YouTube challenges"""
@@ -77,7 +295,7 @@ def detect_platform(url):
     else:
         return "generic"
 
-def get_platform_config(platform):
+def get_platform_config(platform, youtube_cookies_file=None):
     """Get platform-specific yt-dlp configuration"""
     base_config = {
         "user_agent": EXACT_UA,
@@ -107,10 +325,13 @@ def get_platform_config(platform):
             }
         }
         
-        # Add Google cookies if available
-        if os.path.exists(GOOGLE_COOKIES_FILE):
+        # Use Chrome-extracted cookies if available, otherwise fallback to file cookies
+        if youtube_cookies_file and os.path.exists(youtube_cookies_file):
+            config["cookiefile"] = youtube_cookies_file
+            logger.info("🍪 Using Chrome-extracted cookies for YouTube")
+        elif os.path.exists(GOOGLE_COOKIES_FILE):
             config["cookiefile"] = GOOGLE_COOKIES_FILE
-            logger.info("🍪 Using Google cookies for YouTube")
+            logger.info("🍪 Using Google cookies file for YouTube")
         elif os.path.exists(RENDER_COOKIES_FILE):
             config["cookiefile"] = RENDER_COOKIES_FILE
             logger.info("🍪 Using render cookies for YouTube")
@@ -126,7 +347,6 @@ def get_platform_config(platform):
             }
         }
         
-        # Add social cookies if available
         if os.path.exists(SOCIAL_COOKIES_FILE):
             config["cookiefile"] = SOCIAL_COOKIES_FILE
             logger.info("🍪 Using social cookies for TikTok")
@@ -142,7 +362,6 @@ def get_platform_config(platform):
             }
         }
         
-        # Add social cookies if available
         if os.path.exists(SOCIAL_COOKIES_FILE):
             config["cookiefile"] = SOCIAL_COOKIES_FILE
             logger.info("🍪 Using social cookies for Facebook")
@@ -158,7 +377,6 @@ def get_platform_config(platform):
             }
         }
         
-        # Add social cookies if available
         if os.path.exists(SOCIAL_COOKIES_FILE):
             config["cookiefile"] = SOCIAL_COOKIES_FILE
             logger.info("🍪 Using social cookies for Instagram")
@@ -174,7 +392,6 @@ def get_platform_config(platform):
             }
         }
         
-        # Add social cookies if available
         if os.path.exists(SOCIAL_COOKIES_FILE):
             config["cookiefile"] = SOCIAL_COOKIES_FILE
             logger.info("🍪 Using social cookies for Twitter/X")
@@ -205,8 +422,11 @@ def home():
 
 @app.route("/download", methods=["POST"])
 def download_video():
-    """Download video from supported platforms"""
+    """Download video from supported platforms with Chrome authentication for YouTube"""
     logger.info(f"🚀 Download request received ({'Render' if IS_RENDER else 'Local'} mode)")
+    
+    youtube_auth = None
+    youtube_cookies_file = None
     
     try:
         data = request.get_json()
@@ -217,17 +437,37 @@ def download_video():
         platform = detect_platform(url)
         logger.info(f"🌍 Detected platform: {platform}")
 
+        # For YouTube, use Chrome authentication
+        if platform == "youtube":
+            logger.info("🔐 Setting up Chrome authentication for YouTube...")
+            youtube_auth = YouTubeAuthenticator()
+            
+            if youtube_auth.setup_chrome_driver():
+                if youtube_auth.load_youtube_cookies():
+                    if youtube_auth.verify_youtube_authentication():
+                        # Extract cookies for yt-dlp
+                        youtube_cookies_file = youtube_auth.extract_youtube_cookies_for_ytdlp()
+                        logger.info("✅ YouTube authentication successful")
+                    else:
+                        logger.warning("⚠️ YouTube authentication verification failed")
+                else:
+                    logger.warning("⚠️ No YouTube cookies loaded")
+            else:
+                logger.warning("⚠️ Chrome driver setup failed, using fallback")
+
         # Generate unique filename
         uid = str(uuid.uuid4())[:8]
         
         # Get platform-specific configuration
-        ydl_opts = get_platform_config(platform)
+        ydl_opts = get_platform_config(platform, youtube_cookies_file)
         ydl_opts["outtmpl"] = os.path.join(DOWNLOAD_DIR, f"{uid}_%(title)s.%(ext)s")
         
         # Execute download
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             if platform == "youtube":
                 logger.info(f"Using Deno at: {get_deno_path()}")
+                if youtube_cookies_file:
+                    logger.info("🍪 Using Chrome-extracted cookies for enhanced YouTube access")
             
             info = ydl.extract_info(url, download=True)
             filename = os.path.basename(ydl.prepare_filename(info))
@@ -247,6 +487,13 @@ def download_video():
         
         logger.info(f"✅ Download complete: {filename}")
         
+        # Clean up temporary cookies file
+        if youtube_cookies_file and os.path.exists(youtube_cookies_file):
+            try:
+                os.remove(youtube_cookies_file)
+            except:
+                pass
+        
         return jsonify({
             "status": "success",
             "message": "Download successful",
@@ -257,7 +504,12 @@ def download_video():
             "download_url": f"{base_url}/files/{filename}",
             "uploader": info.get("uploader", "Unknown"),
             "view_count": info.get("view_count", 0),
-            "environment": "render" if IS_RENDER else "local"
+            "environment": "render" if IS_RENDER else "local",
+            "authentication": {
+                "chrome_used": youtube_auth is not None and platform == "youtube",
+                "cookies_extracted": youtube_cookies_file is not None,
+                "platform_optimized": True
+            }
         })
 
     except Exception as e:
@@ -288,6 +540,18 @@ def download_video():
                 "error": f"Download failed: {error_msg}",
                 "platform": platform
             }), 500
+    
+    finally:
+        # Clean up Chrome driver
+        if youtube_auth:
+            youtube_auth.cleanup()
+        
+        # Clean up temporary cookies file
+        if youtube_cookies_file and os.path.exists(youtube_cookies_file):
+            try:
+                os.remove(youtube_cookies_file)
+            except:
+                pass
 
 @app.route("/upload_google_cookies", methods=["POST"])
 def upload_google_cookies():
@@ -454,6 +718,34 @@ def files(filename):
 def system_status():
     """System status and capabilities"""
     try:
+        # Check Chrome availability
+        chrome_available = False
+        chrome_status = "not_available"
+        
+        chrome_paths = ["/usr/bin/google-chrome", "/opt/chrome-linux64/chrome"]
+        chromedriver_paths = ["/usr/bin/chromedriver", "/opt/chromedriver-linux64/chromedriver"]
+        
+        chrome_binary = None
+        chromedriver_binary = None
+        
+        for path in chrome_paths:
+            if os.path.exists(path):
+                chrome_binary = path
+                break
+                
+        for path in chromedriver_paths:
+            if os.path.exists(path):
+                chromedriver_binary = path
+                break
+        
+        if chrome_binary and chromedriver_binary:
+            chrome_available = True
+            chrome_status = "available"
+        elif chrome_binary:
+            chrome_status = "chrome_only"
+        elif chromedriver_binary:
+            chrome_status = "chromedriver_only"
+        
         # Check cookie availability
         cookie_sources = []
         if os.path.exists(GOOGLE_COOKIES_FILE):
@@ -470,11 +762,17 @@ def system_status():
             "status": "online",
             "version": "2.0",
             "environment": "render" if IS_RENDER else "local",
-            "server_mode": "OneTap Multi-Platform Video Downloader",
+            "server_mode": "OneTap Multi-Platform Video Downloader with Chrome Authentication",
             "supported_platforms": [
-                "YouTube", "TikTok", "Facebook", "Instagram", 
+                "YouTube (with Chrome authentication)", "TikTok", "Facebook", "Instagram", 
                 "Twitter/X", "Twitch", "Vimeo", "Dailymotion"
             ],
+            "chrome": {
+                "available": chrome_available,
+                "status": chrome_status,
+                "binary": chrome_binary,
+                "driver": chromedriver_binary
+            },
             "cookies": {
                 "available": len(cookie_sources) > 0,
                 "sources": cookie_sources
@@ -488,21 +786,30 @@ def system_status():
                 "files_count": len(os.listdir(DOWNLOAD_DIR)) if os.path.exists(DOWNLOAD_DIR) else 0
             },
             "capabilities": [
-                "Multi-platform video downloading",
-                "yt-dlp with platform optimization",
-                "Cookie-based authentication",
-                "Deno JavaScript engine for YouTube" if deno_available else "Basic YouTube support"
+                "Multi-platform video downloading (YouTube, TikTok, Facebook, Instagram, Twitter/X, Twitch, Vimeo, Dailymotion)",
+                "yt-dlp with platform-specific optimizations",
+                "Cookie-based authentication for private content",
+                "Chrome/Selenium authentication for YouTube" if chrome_available else "Basic YouTube support",
+                "Deno JavaScript engine for enhanced YouTube support" if deno_available else "Basic YouTube support"
             ],
             "recommendations": []
         }
         
         # Add recommendations
+        if not chrome_available:
+            if not chrome_binary:
+                status["recommendations"].append("Chrome not found - YouTube authentication limited")
+            if not chromedriver_binary:
+                status["recommendations"].append("ChromeDriver not found - YouTube authentication limited")
+        
         if not cookie_sources:
             status["recommendations"].append("Upload cookies for better platform access")
+        
         if not deno_available:
             status["recommendations"].append("Deno not found - YouTube downloads may be limited")
-        if len(cookie_sources) > 0:
-            status["recommendations"].append("Multi-platform support active with authentication")
+        
+        if chrome_available and len(cookie_sources) > 0:
+            status["recommendations"].append("Full multi-platform support active with Chrome authentication")
             
         return jsonify(status)
         

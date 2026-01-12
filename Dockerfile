@@ -5,38 +5,64 @@ FROM python:3.11-slim
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 ENV RENDER=true
-ENV CHROME_BIN=/usr/bin/google-chrome
 ENV DISPLAY=:99
 
-# Install Chrome and dependencies for Selenium
+# Install system dependencies including X11 for Chrome
 RUN apt-get update && apt-get install -y \
     wget \
     unzip \
     curl \
-    xvfb \
     git \
     ffmpeg \
-    gnupg \
     ca-certificates \
-    && wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | gpg --dearmor -o /usr/share/keyrings/googlechrome-linux-keyring.gpg \
-    && echo "deb [arch=amd64 signed-by=/usr/share/keyrings/googlechrome-linux-keyring.gpg] http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google.list \
-    && apt-get update \
-    && apt-get install -y google-chrome-stable \
+    xvfb \
+    libxss1 \
+    libappindicator1 \
+    libindicator7 \
+    libasound2 \
+    libatk1.0-0 \
+    libc6 \
+    libcairo2 \
+    libcups2 \
+    libdbus-1-3 \
+    libexpat1 \
+    libfontconfig1 \
+    libgcc1 \
+    libgconf-2-4 \
+    libgdk-pixbuf2.0-0 \
+    libglib2.0-0 \
+    libgtk-3-0 \
+    libnspr4 \
+    libnss3 \
+    libpango-1.0-0 \
+    libpangocairo-1.0-0 \
+    libstdc++6 \
+    libx11-6 \
+    libx11-xcb1 \
+    libxcb1 \
+    libxcomposite1 \
+    libxcursor1 \
+    libxdamage1 \
+    libxext6 \
+    libxfixes3 \
+    libxi6 \
+    libxrandr2 \
+    libxrender1 \
+    libxss1 \
+    libxtst6 \
     && rm -rf /var/lib/apt/lists/*
 
-# Install ChromeDriver using the new Chrome for Testing API
-RUN CHROME_VERSION=$(google-chrome --version | cut -d " " -f3) \
-    && echo "Chrome version: $CHROME_VERSION" \
-    && CHROMEDRIVER_URL="https://googlechromelabs.github.io/chrome-for-testing/latest-patch-versions-per-build-with-downloads.json" \
-    && CHROMEDRIVER_VERSION=$(curl -s "$CHROMEDRIVER_URL" | grep -o '"version":"[^"]*' | head -1 | cut -d'"' -f4) \
-    && echo "ChromeDriver version: $CHROMEDRIVER_VERSION" \
-    && wget -O /tmp/chromedriver.zip "https://storage.googleapis.com/chrome-for-testing-public/$CHROMEDRIVER_VERSION/linux64/chromedriver-linux64.zip" \
-    && unzip /tmp/chromedriver.zip -d /tmp/ \
-    && mv /tmp/chromedriver-linux64/chromedriver /usr/bin/chromedriver \
-    && chmod +x /usr/bin/chromedriver \
-    && rm -rf /tmp/chromedriver.zip /tmp/chromedriver-linux64
+# Install Chrome for Testing + matching ChromeDriver (deterministic versions)
+RUN wget -q https://storage.googleapis.com/chrome-for-testing-public/122.0.6261.69/linux64/chrome-linux64.zip \
+    && wget -q https://storage.googleapis.com/chrome-for-testing-public/122.0.6261.69/linux64/chromedriver-linux64.zip \
+    && unzip chrome-linux64.zip -d /opt/ \
+    && unzip chromedriver-linux64.zip -d /opt/ \
+    && ln -s /opt/chrome-linux64/chrome /usr/bin/google-chrome \
+    && ln -s /opt/chromedriver-linux64/chromedriver /usr/bin/chromedriver \
+    && chmod +x /usr/bin/google-chrome /usr/bin/chromedriver \
+    && rm chrome-linux64.zip chromedriver-linux64.zip
 
-# Install Deno (JavaScript runtime for yt-dlp)
+# Install Deno (JavaScript runtime for yt-dlp YouTube support)
 RUN curl -fsSL https://deno.land/x/install/install.sh | sh
 ENV DENO_INSTALL="/root/.deno"
 ENV PATH="$DENO_INSTALL/bin:$PATH"
