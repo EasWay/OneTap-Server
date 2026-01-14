@@ -10,7 +10,6 @@ import uuid
 import yt_dlp
 import logging
 import time
-import re
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 from urllib.parse import urlparse, parse_qs
@@ -114,28 +113,11 @@ def get_platform_config(platform):
         }
         
     elif platform == "facebook":
+        # Use minimal config for Facebook (most reliable)
         config = {
             **base_config,
             "format": "best[ext=mp4]/best",
-            "nocheckcertificate": True,
-            "ignoreerrors": False,
-            "extractor_args": {
-                "facebook": {
-                    "legacy_ssl": True,
-                }
-            },
-            "http_headers": {
-                **base_config["http_headers"],
-                "Referer": "https://www.facebook.com/",
-                "Origin": "https://www.facebook.com",
-                "Sec-Fetch-Dest": "document",
-                "Sec-Fetch-Mode": "navigate",
-                "Sec-Fetch-Site": "same-origin",
-                "Sec-Fetch-User": "?1",
-                "sec-ch-ua": '"Not_A Brand";v="8", "Chromium";v="122", "Google Chrome";v="122"',
-                "sec-ch-ua-mobile": "?0",
-                "sec-ch-ua-platform": '"Windows"'
-            }
+            "nocheckcertificate": True
         }
         
     elif platform == "instagram":
@@ -256,98 +238,36 @@ def download_video():
         ydl_opts = get_platform_config(platform)
         ydl_opts["outtmpl"] = os.path.join(DOWNLOAD_DIR, f"{uid}_%(title)s.%(ext)s")
         
-        # Execute download with fallback for Facebook
+        # Execute download
         logger.info(f"⬇️ Starting download from {platform}...")
         
         info = None
         filename = None
         
-        # Try primary method
+        # Try primary method first
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=True)
                 filename = os.path.basename(ydl.prepare_filename(info))
         except Exception as primary_error:
-            logger.warning(f"⚠️ Primary extraction failed: {str(primary_error)}")
-            
-            # Facebook fallback: Try with different extractors
-            if platform == "facebook":
-                logger.info("🔄 Trying Facebook fallback methods...")
+            # Facebook fallback: Use minimal config (proven to work)
+            if platform == "facebook" and "cannot parse" in str(primary_error).lower():
+                logger.info("🔄 Using Facebook optimized config...")
                 
-                # Method 1: Try forcing generic extractor
-                try:
-                    logger.info("   Method 1: Generic extractor...")
-                    fallback_opts = ydl_opts.copy()
-                    fallback_opts["extractor_args"] = {}
-                    fallback_opts["force_generic_extractor"] = True
-                    
-                    with yt_dlp.YoutubeDL(fallback_opts) as ydl:
-                        info = ydl.extract_info(url, download=True)
-                        filename = os.path.basename(ydl.prepare_filename(info))
-                        logger.info("   ✅ Generic extractor succeeded!")
-                except Exception as e1:
-                    logger.warning(f"   ❌ Generic extractor failed: {str(e1)}")
-                    
-                    # Method 2: Try with minimal config
-                    try:
-                        logger.info("   Method 2: Minimal config...")
-                        minimal_opts = {
-                            "format": "best",
-                            "outtmpl": ydl_opts["outtmpl"],
-                            "cookiefile": SOCIAL_COOKIES_FILE if os.path.exists(SOCIAL_COOKIES_FILE) else None,
-                            "quiet": False,
-                            "no_warnings": False
-                        }
-                        
-                        with yt_dlp.YoutubeDL(minimal_opts) as ydl:
-                            info = ydl.extract_info(url, download=True)
-                            filename = os.path.basename(ydl.prepare_filename(info))
-                            logger.info("   ✅ Minimal config succeeded!")
-                    except Exception as e2:
-                        logger.warning(f"   ❌ Minimal config failed: {str(e2)}")
-                        
-                        # Method 3: Try extracting video ID and using direct URL
-                        try:
-                            logger.info("   Method 3: Direct video URL...")
-                            import re
-                            
-                            # Extract video ID from various Facebook URL formats
-                            video_id = None
-                            patterns = [
-                                r'/reel/(\d+)',
-                                r'/videos/(\d+)',
-                                r'[?&]v=(\d+)',
-                                r'/watch/?\?v=(\d+)',
-                                r'facebook\.com/(\d+)'
-                            ]
-                            
-                            for pattern in patterns:
-                                match = re.search(pattern, url)
-                                if match:
-                                    video_id = match.group(1)
-                                    break
-                            
-                            if video_id:
-                                direct_url = f"https://www.facebook.com/watch/?v={video_id}"
-                                logger.info(f"   Trying direct URL: {direct_url}")
-                                
-                                with yt_dlp.YoutubeDL(minimal_opts) as ydl:
-                                    info = ydl.extract_info(direct_url, download=True)
-                                    filename = os.path.basename(ydl.prepare_filename(info))
-                                    logger.info("   ✅ Direct URL succeeded!")
-                            else:
-                                raise Exception("Could not extract video ID")
-                                
-                        except Exception as e3:
-                            logger.error(f"   ❌ All fallback methods failed: {str(e3)}")
-                            raise primary_error  # Re-raise original error
+                minimal_opts = {
+                    "format": "best",
+                    "outtmpl": ydl_opts["outtmpl"],
+                    "cookiefile": SOCIAL_COOKIES_FILE if os.path.exists(SOCIAL_COOKIES_FILE) else None,
+                    "quiet": False,
+                    "no_warnings": False
+                }
+                
+                with yt_dlp.YoutubeDL(minimal_opts) as ydl:
+                    info = ydl.extract_info(url, download=True)
+                    filename = os.path.basename(ydl.prepare_filename(info))
+                    logger.info("✅ Facebook optimized config succeeded!")
             else:
-                # For non-Facebook platforms, just re-raise the error
                 raise primary_error
-        
-        # If we still don't have info, something went wrong
-        if not info or not filename:
-            raise Exception("Failed to extract video information")
         
         # Clean filename for safety
         safe_filename = "".join(c for c in filename if c.isalnum() or c in (' ', '-', '_', '.')).rstrip()
@@ -406,13 +326,6 @@ def download_video():
                 "message": f"This {platform} URL format is not supported",
                 "platform": platform
             }), 400
-        elif "cannot parse" in error_msg.lower():
-            return jsonify({
-                "error": "Parsing error",
-                "message": f"{platform} changed their API. Please try again or report this issue.",
-                "platform": platform,
-                "suggestion": "Try using a different URL format (e.g., direct video link instead of share link)"
-            }), 500
         else:
             return jsonify({
                 "error": f"Download failed: {error_msg}",
