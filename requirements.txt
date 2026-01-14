@@ -1,10 +1,4 @@
-flask
-flask-cors
+flask==3.0.0
+flask-cors==4.0.0
 yt-dlp @ git+https://github.com/yt-dlp/yt-dlp.git@master
-requests
-curl_cffi
-ffmpeg-python
-cryptography
-selenium
-webdriver-manager
-psutil
+requests==2.31.0
