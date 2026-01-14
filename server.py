@@ -43,9 +43,6 @@ SOCIAL_COOKIES_FILE = os.path.join(os.getcwd(), "social_cookies.txt")
 # Detect environment
 IS_RENDER = os.environ.get('RENDER') is not None
 
-# User agent for consistency across platforms
-USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-
 # Platform detection patterns
 PLATFORM_PATTERNS = {
     'tiktok': ['tiktok.com', 'vm.tiktok.com'],
@@ -82,81 +79,17 @@ def detect_platform(url):
 def get_platform_config(platform):
     """Get optimized platform-specific yt-dlp configuration"""
     
-    # Base configuration with industry best practices
-    base_config = {
-        "user_agent": USER_AGENT,
+    # Minimal config that works reliably across all platforms
+    config = {
+        "format": "best",
         "quiet": False,
         "no_warnings": False,
-        "merge_output_format": "mp4",
         "retries": 5,
         "fragment_retries": 5,
-        "skip_unavailable_fragments": True,
         "socket_timeout": 30,
         "http_chunk_size": 10485760,  # 10MB chunks
-        "concurrent_fragment_downloads": 4,  # Parallel downloads for speed
-        "http_headers": {
-            "User-Agent": USER_AGENT,
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.9",
-            "Accept-Encoding": "gzip, deflate, br",
-            "DNT": "1",
-            "Connection": "keep-alive",
-            "Upgrade-Insecure-Requests": "1"
-        }
+        "concurrent_fragment_downloads": 4  # Parallel downloads for speed
     }
-    
-    # Platform-specific optimizations
-    if platform == "tiktok":
-        config = {
-            **base_config,
-            "format": "best[ext=mp4]/best",
-            "extractor_args": {
-                "tiktok": {
-                    "webpage_url_basename": "video",
-                    "api_hostname": "api22-normal-c-useast2a.tiktokv.com"
-                }
-            }
-        }
-        
-    elif platform == "facebook":
-        # Use minimal config for Facebook (proven to work reliably)
-        config = {
-            "format": "best",
-            "quiet": False,
-            "no_warnings": False,
-            "retries": 5,
-            "fragment_retries": 5,
-            "socket_timeout": 30,
-            "http_chunk_size": 10485760,
-            "concurrent_fragment_downloads": 4
-        }
-        
-    elif platform == "instagram":
-        config = {
-            **base_config,
-            "format": "best[ext=mp4]/best",
-            "extractor_args": {
-                "instagram": {
-                    "comment_count": 0
-                }
-            },
-            "http_headers": {
-                **base_config["http_headers"],
-                "Referer": "https://www.instagram.com/",
-                "X-IG-App-ID": "936619743392459"
-            }
-        }
-        
-    elif platform == "twitter":
-        config = {
-            **base_config,
-            "format": "best[ext=mp4]/best"
-        }
-        
-    else:
-        # Generic fallback
-        config = base_config.copy()
-        config["format"] = "best[ext=mp4]/best"
     
     # Add cookies if available
     if os.path.exists(SOCIAL_COOKIES_FILE):
