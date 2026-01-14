@@ -113,11 +113,16 @@ def get_platform_config(platform):
         }
         
     elif platform == "facebook":
-        # Use minimal config for Facebook (most reliable)
+        # Use minimal config for Facebook (proven to work reliably)
         config = {
-            **base_config,
-            "format": "best[ext=mp4]/best",
-            "nocheckcertificate": True
+            "format": "best",
+            "quiet": False,
+            "no_warnings": False,
+            "retries": 5,
+            "fragment_retries": 5,
+            "socket_timeout": 30,
+            "http_chunk_size": 10485760,
+            "concurrent_fragment_downloads": 4
         }
         
     elif platform == "instagram":
@@ -139,16 +144,7 @@ def get_platform_config(platform):
     elif platform == "twitter":
         config = {
             **base_config,
-            "format": "best[ext=mp4]/best",
-            "extractor_args": {
-                "twitter": {
-                    "api": "syndication"
-                }
-            },
-            "http_headers": {
-                **base_config["http_headers"],
-                "Referer": "https://twitter.com/"
-            }
+            "format": "best[ext=mp4]/best"
         }
         
     else:
@@ -241,33 +237,9 @@ def download_video():
         # Execute download
         logger.info(f"⬇️ Starting download from {platform}...")
         
-        info = None
-        filename = None
-        
-        # Try primary method first
-        try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url, download=True)
-                filename = os.path.basename(ydl.prepare_filename(info))
-        except Exception as primary_error:
-            # Facebook fallback: Use minimal config (proven to work)
-            if platform == "facebook" and "cannot parse" in str(primary_error).lower():
-                logger.info("🔄 Using Facebook optimized config...")
-                
-                minimal_opts = {
-                    "format": "best",
-                    "outtmpl": ydl_opts["outtmpl"],
-                    "cookiefile": SOCIAL_COOKIES_FILE if os.path.exists(SOCIAL_COOKIES_FILE) else None,
-                    "quiet": False,
-                    "no_warnings": False
-                }
-                
-                with yt_dlp.YoutubeDL(minimal_opts) as ydl:
-                    info = ydl.extract_info(url, download=True)
-                    filename = os.path.basename(ydl.prepare_filename(info))
-                    logger.info("✅ Facebook optimized config succeeded!")
-            else:
-                raise primary_error
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            filename = os.path.basename(ydl.prepare_filename(info))
         
         # Clean filename for safety
         safe_filename = "".join(c for c in filename if c.isalnum() or c in (' ', '-', '_', '.')).rstrip()
