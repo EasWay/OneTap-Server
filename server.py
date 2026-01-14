@@ -59,7 +59,13 @@ def detect_platform(url):
     """Detect platform from URL with improved accuracy"""
     try:
         parsed = urlparse(url.lower())
-        domain = parsed.netloc.replace('www.', '').replace('m.', '')
+        domain = parsed.netloc
+        
+        # Remove common prefixes
+        for prefix in ['www.', 'm.', 'mobile.']:
+            if domain.startswith(prefix):
+                domain = domain[len(prefix):]
+                break
         
         for platform, patterns in PLATFORM_PATTERNS.items():
             if any(pattern in domain for pattern in patterns):
