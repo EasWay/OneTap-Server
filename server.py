@@ -91,6 +91,10 @@ def get_platform_config(platform):
         "concurrent_fragment_downloads": 4  # Parallel downloads for speed
     }
     
+    # Force generic extractor for Facebook (bypasses broken Facebook-specific parser)
+    if platform == "facebook":
+        config["force_generic_extractor"] = True
+    
     # Add cookies if available
     if os.path.exists(SOCIAL_COOKIES_FILE):
         config["cookiefile"] = SOCIAL_COOKIES_FILE
