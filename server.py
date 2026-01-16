@@ -60,64 +60,33 @@ def clean_url(url, platform):
         url = re.sub(r'[?&](utm_[^&]*|fbclid|igshid|igsh|rdid|share_url|_r|_t)[^&]*', '', url)
         
         if platform == "tiktok":
-            # Handle TikTok photo posts (convert to video format)
-            if '/photo/' in url:
-                # TikTok photos are not supported, return error-friendly format
-                logger.warning("⚠️ TikTok photo posts are not supported, only videos")
-                return None
-            
-            # Extract TikTok video ID and create clean URL
-            patterns = [
-                r'tiktok\.com/@[^/]+/video/(\d+)',
-                r'vm\.tiktok\.com/([A-Za-z0-9]+)',
-                r'tiktok\.com/t/([A-Za-z0-9]+)'
-            ]
-            
-            for pattern in patterns:
-                match = re.search(pattern, url)
-                if match:
-                    video_id = match.group(1)
-                    if pattern.startswith(r'tiktok\.com/@'):
-                        # Already clean format
-                        return url.split('?')[0]  # Remove query params
-                    else:
-                        # Convert short URL to full format - let yt-dlp handle it
-                        return url.split('?')[0]
+            # For TikTok, just remove query params and let yt-dlp handle all URL formats
+            # yt-dlp is smart enough to handle various TikTok URL formats
+            cleaned = url.split('?')[0]
+            logger.info(f"🧹 TikTok URL cleaned: {cleaned}")
+            return cleaned
             
         elif platform == "facebook":
-            # Extract Facebook video ID and create clean URL
-            patterns = [
-                r'/reel/(\d+)',
-                r'/videos/(\d+)',
-                r'[?&]v=(\d+)',
-                r'/watch/?\?v=(\d+)',
-                r'facebook\.com/(\d+)'
-            ]
-            
-            for pattern in patterns:
-                match = re.search(pattern, url)
-                if match:
-                    video_id = match.group(1)
-                    return f"https://www.facebook.com/watch/?v={video_id}"
+            # For Facebook, just remove query params and let yt-dlp handle it
+            cleaned = url.split('?')[0]
+            logger.info(f"🧹 Facebook URL cleaned: {cleaned}")
+            return cleaned
             
         elif platform == "instagram":
-            # Clean Instagram URLs
-            if '/reel/' in url or '/p/' in url:
-                # Extract post ID
-                match = re.search(r'/(reel|p)/([A-Za-z0-9_-]+)', url)
-                if match:
-                    post_type, post_id = match.groups()
-                    return f"https://www.instagram.com/{post_type}/{post_id}/"
+            # For Instagram, just remove query params and let yt-dlp handle it
+            cleaned = url.split('?')[0]
+            logger.info(f"🧹 Instagram URL cleaned: {cleaned}")
+            return cleaned
             
         elif platform == "twitter":
-            # Clean Twitter URLs
-            match = re.search(r'status/(\d+)', url)
-            if match:
-                tweet_id = match.group(1)
-                return f"https://twitter.com/i/status/{tweet_id}"
+            # For Twitter, just remove query params and let yt-dlp handle it
+            cleaned = url.split('?')[0]
+            logger.info(f"🧹 Twitter URL cleaned: {cleaned}")
+            return cleaned
         
         # Fallback: just remove query parameters
         cleaned = url.split('?')[0]
+        logger.info(f"🧹 Generic URL cleaned: {cleaned}")
         return cleaned if cleaned else url
         
     except Exception as e:
@@ -280,14 +249,23 @@ def download_video():
                 "message": "Only TikTok, Facebook, Instagram, and Twitter are supported"
             }), 400
 
-        # Clean URL for better extraction
-        cleaned_url = clean_url(url, platform)
-        
-        # Check if URL cleaning failed (e.g., TikTok photos)
-        if cleaned_url is None:
+        # Check for unsupported content types BEFORE cleaning
+        if platform == "tiktok" and '/photo/' in url:
+            logger.warning("⚠️ TikTok photo post detected - not supported")
             return jsonify({
                 "error": "Unsupported content type",
                 "message": "TikTok photo posts are not supported. Only video posts can be downloaded.",
+                "platform": platform
+            }), 400
+        
+        # Clean URL for better extraction
+        cleaned_url = clean_url(url, platform)
+        
+        # Check if URL cleaning failed
+        if cleaned_url is None:
+            return jsonify({
+                "error": "Unsupported content type",
+                "message": "This content type is not supported. Only videos can be downloaded.",
                 "platform": platform
             }), 400
         
