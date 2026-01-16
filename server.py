@@ -323,6 +323,14 @@ def download_video():
         error_msg = str(e)
         logger.error(f"❌ Download failed: {error_msg}")
         
+        # Check if it's a TikTok photo post (detected after redirect)
+        if platform == "tiktok" and ("/photo/" in error_msg or "photo" in error_msg.lower()):
+            return jsonify({
+                "error": "Unsupported content type",
+                "message": "TikTok photo posts are not supported. Only video posts can be downloaded.",
+                "platform": platform
+            }), 400
+        
         # Provide helpful error messages
         if "login" in error_msg.lower() or "private" in error_msg.lower():
             return jsonify({
@@ -337,6 +345,13 @@ def download_video():
                 "platform": platform
             }), 404
         elif "unsupported url" in error_msg.lower():
+            # Check if the error message contains a photo URL
+            if "/photo/" in error_msg:
+                return jsonify({
+                    "error": "Unsupported content type",
+                    "message": "TikTok photo posts are not supported. Only video posts can be downloaded.",
+                    "platform": platform
+                }), 400
             return jsonify({
                 "error": "Unsupported URL format",
                 "message": f"This {platform} URL format is not supported",
