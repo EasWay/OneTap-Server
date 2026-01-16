@@ -10,6 +10,7 @@ import uuid
 import yt_dlp
 import logging
 import time
+import re
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 from urllib.parse import urlparse, parse_qs
@@ -52,6 +53,71 @@ PLATFORM_PATTERNS = {
 }
 
 
+def clean_url(url, platform):
+    """Clean and normalize URLs for better extraction"""
+    try:
+        # Remove common tracking parameters
+        url = re.sub(r'[?&](utm_[^&]*|fbclid|igshid|igsh|rdid|share_url)[^&]*', '', url)
+        
+        if platform == "tiktok":
+            # Extract TikTok video ID and create clean URL
+            patterns = [
+                r'tiktok\.com/@[^/]+/video/(\d+)',
+                r'vm\.tiktok\.com/([A-Za-z0-9]+)',
+                r'tiktok\.com/t/([A-Za-z0-9]+)'
+            ]
+            
+            for pattern in patterns:
+                match = re.search(pattern, url)
+                if match:
+                    video_id = match.group(1)
+                    if pattern.startswith(r'tiktok\.com/@'):
+                        # Already clean format
+                        return url.split('?')[0]  # Remove query params
+                    else:
+                        # Convert short URL to full format - let yt-dlp handle it
+                        return url.split('?')[0]
+            
+        elif platform == "facebook":
+            # Extract Facebook video ID and create clean URL
+            patterns = [
+                r'/reel/(\d+)',
+                r'/videos/(\d+)',
+                r'[?&]v=(\d+)',
+                r'/watch/?\?v=(\d+)',
+                r'facebook\.com/(\d+)'
+            ]
+            
+            for pattern in patterns:
+                match = re.search(pattern, url)
+                if match:
+                    video_id = match.group(1)
+                    return f"https://www.facebook.com/watch/?v={video_id}"
+            
+        elif platform == "instagram":
+            # Clean Instagram URLs
+            if '/reel/' in url or '/p/' in url:
+                # Extract post ID
+                match = re.search(r'/(reel|p)/([A-Za-z0-9_-]+)', url)
+                if match:
+                    post_type, post_id = match.groups()
+                    return f"https://www.instagram.com/{post_type}/{post_id}/"
+            
+        elif platform == "twitter":
+            # Clean Twitter URLs
+            match = re.search(r'status/(\d+)', url)
+            if match:
+                tweet_id = match.group(1)
+                return f"https://twitter.com/i/status/{tweet_id}"
+        
+        # Fallback: just remove query parameters
+        return url.split('?')[0]
+        
+    except Exception as e:
+        logger.warning(f"⚠️ URL cleaning failed: {e}")
+        return url
+
+
 def detect_platform(url):
     """Detect platform from URL with improved accuracy"""
     try:
@@ -79,21 +145,30 @@ def detect_platform(url):
 def get_platform_config(platform):
     """Get optimized platform-specific yt-dlp configuration"""
     
-    # Minimal config that works reliably across all platforms
-    config = {
-        "format": "best",
-        "quiet": False,
-        "no_warnings": False,
-        "retries": 5,
-        "fragment_retries": 5,
-        "socket_timeout": 30,
-        "http_chunk_size": 10485760,  # 10MB chunks
-        "concurrent_fragment_downloads": 4  # Parallel downloads for speed
-    }
-    
-    # Force generic extractor for Facebook (bypasses broken Facebook-specific parser)
     if platform == "facebook":
-        config["force_generic_extractor"] = True
+        # Ultra-minimal config for Facebook (bypasses all extractors)
+        config = {
+            "format": "best",
+            "quiet": False,
+            "no_warnings": False,
+            "retries": 3,
+            "socket_timeout": 20,
+            "extractor_args": {},  # No extractor-specific args
+            "force_generic_extractor": True,
+            "no_check_certificate": True
+        }
+    else:
+        # Standard minimal config for other platforms
+        config = {
+            "format": "best",
+            "quiet": False,
+            "no_warnings": False,
+            "retries": 5,
+            "fragment_retries": 5,
+            "socket_timeout": 30,
+            "http_chunk_size": 10485760,  # 10MB chunks
+            "concurrent_fragment_downloads": 4  # Parallel downloads for speed
+        }
     
     # Add cookies if available
     if os.path.exists(SOCIAL_COOKIES_FILE):
@@ -170,6 +245,10 @@ def download_video():
                 "message": "Only TikTok, Facebook, Instagram, and Twitter are supported"
             }), 400
 
+        # Clean URL for better extraction
+        cleaned_url = clean_url(url, platform)
+        logger.info(f"🧹 Cleaned URL: {cleaned_url}")
+
         # Generate unique filename
         uid = str(uuid.uuid4())[:8]
         
@@ -181,7 +260,7 @@ def download_video():
         logger.info(f"⬇️ Starting download from {platform}...")
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
+            info = ydl.extract_info(cleaned_url, download=True)
             filename = os.path.basename(ydl.prepare_filename(info))
         
         # Clean filename for safety
