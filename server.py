@@ -46,7 +46,6 @@ IS_RENDER = os.environ.get('RENDER') is not None
 
 # Platform detection patterns
 PLATFORM_PATTERNS = {
-    'youtube': ['youtube.com', 'youtu.be', 'm.youtube.com'],
     'tiktok': ['tiktok.com', 'vm.tiktok.com'],
     'facebook': ['facebook.com', 'fb.watch', 'fb.com'],
     'instagram': ['instagram.com', 'instagr.am'],
@@ -58,23 +57,15 @@ def clean_url(url, platform):
     """Clean and normalize URLs for better extraction"""
     try:
         # Remove common tracking parameters
-        url = re.sub(r'[?&](utm_[^&]*|fbclid|igshid|igsh|rdid|share_url)[^&]*', '', url)
+        url = re.sub(r'[?&](utm_[^&]*|fbclid|igshid|igsh|rdid|share_url|_r|_t)[^&]*', '', url)
         
-        if platform == "youtube":
-            # Extract YouTube video ID and create clean URL
-            patterns = [
-                r'(?:youtube\.com/watch\?v=|youtu\.be/)([A-Za-z0-9_-]{11})',
-                r'youtube\.com/embed/([A-Za-z0-9_-]{11})',
-                r'youtube\.com/v/([A-Za-z0-9_-]{11})'
-            ]
+        if platform == "tiktok":
+            # Handle TikTok photo posts (convert to video format)
+            if '/photo/' in url:
+                # TikTok photos are not supported, return error-friendly format
+                logger.warning("⚠️ TikTok photo posts are not supported, only videos")
+                return None
             
-            for pattern in patterns:
-                match = re.search(pattern, url)
-                if match:
-                    video_id = match.group(1)
-                    return f"https://www.youtube.com/watch?v={video_id}"
-            
-        elif platform == "tiktok":
             # Extract TikTok video ID and create clean URL
             patterns = [
                 r'tiktok\.com/@[^/]+/video/(\d+)',
@@ -126,7 +117,8 @@ def clean_url(url, platform):
                 return f"https://twitter.com/i/status/{tweet_id}"
         
         # Fallback: just remove query parameters
-        return url.split('?')[0]
+        cleaned = url.split('?')[0]
+        return cleaned if cleaned else url
         
     except Exception as e:
         logger.warning(f"⚠️ URL cleaning failed: {e}")
@@ -160,19 +152,7 @@ def detect_platform(url):
 def get_platform_config(platform):
     """Get optimized platform-specific yt-dlp configuration"""
     
-    if platform == "youtube":
-        # Minimal config for YouTube (reliable and fast)
-        config = {
-            "format": "best[ext=mp4]/best",
-            "quiet": False,
-            "no_warnings": False,
-            "retries": 5,
-            "fragment_retries": 5,
-            "socket_timeout": 30,
-            "http_chunk_size": 10485760,
-            "concurrent_fragment_downloads": 4
-        }
-    elif platform == "facebook":
+    if platform == "facebook":
         # Ultra-minimal config for Facebook (bypasses all extractors)
         config = {
             "format": "best",
@@ -212,9 +192,9 @@ def index():
     """Health check and API info"""
     return jsonify({
         "status": "online",
-        "service": "OneTap Multi-Platform Video Downloader",
+        "service": "OneTap Social Media Video Downloader",
         "version": "2.1.0",
-        "supported_platforms": ["youtube", "tiktok", "facebook", "instagram", "twitter"],
+        "supported_platforms": ["tiktok", "facebook", "instagram", "twitter"],
         "environment": "render" if IS_RENDER else "local",
         "cookies_loaded": os.path.exists(SOCIAL_COOKIES_FILE),
         "endpoints": {
@@ -269,11 +249,20 @@ def download_video():
         if platform == "generic":
             return jsonify({
                 "error": "Unsupported platform",
-                "message": "Only YouTube, TikTok, Facebook, Instagram, and Twitter are supported"
+                "message": "Only TikTok, Facebook, Instagram, and Twitter are supported"
             }), 400
 
         # Clean URL for better extraction
         cleaned_url = clean_url(url, platform)
+        
+        # Check if URL cleaning failed (e.g., TikTok photos)
+        if cleaned_url is None:
+            return jsonify({
+                "error": "Unsupported content type",
+                "message": "TikTok photo posts are not supported. Only video posts can be downloaded.",
+                "platform": platform
+            }), 400
+        
         logger.info(f"🧹 Cleaned URL: {cleaned_url}")
 
         # Generate unique filename
@@ -386,7 +375,7 @@ def upload_cookies():
         return jsonify({
             "message": "Cookies uploaded successfully",
             "statistics": cookie_stats,
-            "platforms": ["youtube", "tiktok", "facebook", "instagram", "twitter"]
+            "platforms": ["tiktok", "facebook", "instagram", "twitter"]
         })
         
     except Exception as e:
@@ -398,7 +387,6 @@ def validate_cookies(cookie_file):
     """Validate and analyze cookies file"""
     stats = {
         'total': 0,
-        'youtube': 0,
         'tiktok': 0,
         'facebook': 0,
         'instagram': 0,
@@ -416,9 +404,7 @@ def validate_cookies(cookie_file):
                         domain = parts[0].lower()
                         stats['total'] += 1
                         
-                        if 'youtube' in domain or 'google' in domain:
-                            stats['youtube'] += 1
-                        elif 'tiktok' in domain:
+                        if 'tiktok' in domain:
                             stats['tiktok'] += 1
                         elif 'facebook' in domain or 'fb' in domain:
                             stats['facebook'] += 1
@@ -479,6 +465,6 @@ if __name__ == "__main__":
     logger.info(f"📁 Download directory: {DOWNLOAD_DIR}")
     logger.info(f"🍪 Cookies file: {SOCIAL_COOKIES_FILE}")
     logger.info(f"🌍 Environment: {'Render' if IS_RENDER else 'Local'}")
-    logger.info(f"✅ Supported platforms: YouTube, TikTok, Facebook, Instagram, Twitter")
+    logger.info(f"✅ Supported platforms: TikTok, Facebook, Instagram, Twitter")
     
     app.run(host="0.0.0.0", port=port, debug=False)
