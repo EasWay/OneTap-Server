@@ -201,7 +201,8 @@ def index():
             "download": "/download (POST)",
             "upload_cookies": "/upload_cookies (POST)",
             "files": "/files/<filename> (GET)",
-            "health": "/health (GET)"
+            "health": "/health (GET)",
+            "version": "/version (GET) - App update check"
         }
     })
 
@@ -216,6 +217,33 @@ def health():
         "cookies_available": os.path.exists(SOCIAL_COOKIES_FILE),
         "disk_space_mb": get_disk_space()
     })
+
+
+@app.route("/version", methods=["GET"])
+def version():
+    """App update endpoint - returns latest version info"""
+    try:
+        # Configure your app update information here
+        # Update these values when you release a new version
+        latest_version_code = 3  # Must match versionCode in app/build.gradle.kts
+        apk_download_url = "https://github.com/yourusername/onetap/releases/download/v1.2/OneTap_v1.2.apk"
+        release_notes = "Bug fixes and performance improvements"
+        
+        logger.info(f"📱 Version check requested - Latest: v{latest_version_code}")
+        
+        return jsonify({
+            "status": "success",
+            "latest_version": latest_version_code,
+            "apk_url": apk_download_url,
+            "release_notes": release_notes,
+            "server_version": "2.1.0",
+            "timestamp": time.time()
+        })
+    except Exception as e:
+        logger.error(f"❌ Version check failed: {str(e)}")
+        return jsonify({
+            "error": f"Version check failed: {str(e)}"
+        }), 500
 
 
 def get_disk_space():
