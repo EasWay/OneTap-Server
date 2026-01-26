@@ -334,8 +334,8 @@ def version():
     try:
         # Configure your app update information here
         # Update these values when you release a new version
-        latest_version_code = 3  # Must match versionCode in app/build.gradle.kts
-        apk_download_url = "https://github.com/yourusername/onetap/releases/download/v1.2/OneTap_v1.2.apk"
+        latest_version_code = 4  # Must match versionCode in app/build.gradle.kts
+        apk_download_url = "https://github.com/EasWay/OneTap-Releases/releases/download/v1.3/app-release.apk"
         release_notes = "Bug fixes and performance improvements"
         
         logger.info(f"📱 Version check requested - Latest: v{latest_version_code}")
