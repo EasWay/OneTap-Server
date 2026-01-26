@@ -11,9 +11,11 @@ import yt_dlp
 import logging
 import time
 import re
+import requests
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 from urllib.parse import urlparse, parse_qs
+from tiktok_extractor import TikTokExtractor
 
 # Configure logging
 logging.basicConfig(
@@ -43,6 +45,12 @@ SOCIAL_COOKIES_FILE = os.path.join(os.getcwd(), "social_cookies.txt")
 
 # Detect environment
 IS_RENDER = os.environ.get('RENDER') is not None
+
+# Initialize TikTok mobile API extractor (will be created per request for user-specific fingerprinting)
+def get_tiktok_extractor(user_ip):
+    """Get TikTok extractor with user-specific device fingerprinting"""
+    # Use user IP as identifier for consistent device fingerprinting
+    return TikTokExtractor(user_identifier=user_ip)
 
 # Platform detection patterns
 PLATFORM_PATTERNS = {
@@ -116,6 +124,138 @@ def detect_platform(url):
     except Exception as e:
         logger.error(f"❌ Error detecting platform: {e}")
         return "generic"
+
+
+def download_tiktok_video(url, uid, start_time):
+    """
+    Download TikTok video using mobile API emulation with aggressive fallback
+    """
+    try:
+        logger.info("🎯 Using TikTok Mobile API Emulation")
+        
+        # Get user IP for device fingerprinting consistency
+        user_ip = request.environ.get('HTTP_X_FORWARDED_FOR', request.environ.get('REMOTE_ADDR', 'unknown'))
+        
+        # Create TikTok extractor with user-specific device fingerprinting
+        tiktok_extractor = get_tiktok_extractor(user_ip)
+        
+        # Extract video using mobile API with fallback chain
+        extraction_result = tiktok_extractor.extract_video(url)
+        
+        if not extraction_result["success"]:
+            logger.error(f"❌ TikTok extraction failed: {extraction_result['error']}")
+            return jsonify({
+                "error": "TikTok extraction failed",
+                "message": extraction_result["error"],
+                "platform": "tiktok"
+            }), 400
+        
+        video_url = extraction_result["video_url"]
+        title = extraction_result.get("title", "TikTok Video")
+        author = extraction_result.get("author", "Unknown")
+        duration = extraction_result.get("duration", 0)
+        view_count = extraction_result.get("view_count", 0)
+        like_count = extraction_result.get("like_count", 0)
+        extractor_used = extraction_result.get("extractor", "unknown")
+        has_watermark = extraction_result.get("has_watermark", True)
+        quality = extraction_result.get("quality", "medium")
+        
+        logger.info(f"✅ TikTok extraction successful via {extractor_used}")
+        logger.info(f"📹 Video URL: {video_url[:50]}...")
+        logger.info(f"🎬 Title: {title}")
+        logger.info(f"👤 Author: {author}")
+        logger.info(f"💧 Watermark: {'Yes' if has_watermark else 'No'}")
+        logger.info(f"🎯 Quality: {quality}")
+        
+        # Download the video file
+        logger.info("⬇️ Downloading TikTok video file...")
+        
+        # Create safe filename
+        safe_title = "".join(c for c in title if c.isalnum() or c in (' ', '-', '_')).strip()
+        if not safe_title:
+            safe_title = "TikTok Video"
+        
+        filename = f"{uid}_{safe_title}.mp4"
+        filepath = os.path.join(DOWNLOAD_DIR, filename)
+        
+        # Download with progress tracking
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Linux; Android 13; SM-G998B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Mobile Safari/537.36",
+            "Referer": "https://www.tiktok.com/",
+            "Accept": "*/*",
+            "Accept-Encoding": "identity",
+            "Range": "bytes=0-"
+        }
+        
+        response = requests.get(video_url, headers=headers, stream=True, timeout=60)
+        response.raise_for_status()
+        
+        total_size = int(response.headers.get('content-length', 0))
+        downloaded_size = 0
+        
+        with open(filepath, 'wb') as f:
+            for chunk in response.iter_content(chunk_size=65536):  # 64KB chunks
+                if chunk:
+                    f.write(chunk)
+                    downloaded_size += len(chunk)
+                    
+                    # Log progress every 2MB
+                    if downloaded_size % (2 * 1024 * 1024) == 0 and total_size > 0:
+                        progress = (downloaded_size / total_size) * 100
+                        logger.info(f"📥 Download progress: {progress:.1f}% ({downloaded_size / (1024*1024):.1f}MB)")
+        
+        # Verify file was downloaded
+        if not os.path.exists(filepath) or os.path.getsize(filepath) == 0:
+            raise Exception("Downloaded file is empty or missing")
+        
+        file_size_mb = os.path.getsize(filepath) / (1024 * 1024)
+        download_time = time.time() - start_time
+        
+        # Build response
+        base_url = request.host_url.rstrip("/")
+        if IS_RENDER:
+            base_url = base_url.replace("http://", "https://")
+        
+        logger.info(f"✅ TikTok download complete: {filename} ({download_time:.2f}s, {file_size_mb:.2f}MB)")
+        
+        return jsonify({
+            "status": "success",
+            "message": "TikTok download successful via mobile API",
+            "platform": "tiktok",
+            "title": title,
+            "duration": duration,
+            "filename": filename,
+            "download_url": f"{base_url}/files/{filename}",
+            "uploader": author,
+            "view_count": view_count,
+            "like_count": like_count,
+            "download_time": round(download_time, 2),
+            "file_size_mb": round(file_size_mb, 2),
+            "extractor": extractor_used,
+            "has_watermark": has_watermark,
+            "quality": quality,
+            "environment": "render" if IS_RENDER else "local",
+            # Additional TikTok-specific metadata
+            "video_codec": "h264",
+            "audio_codec": "aac", 
+            "container": "mp4"
+        })
+        
+    except requests.exceptions.RequestException as e:
+        logger.error(f"❌ TikTok video download failed: {e}")
+        return jsonify({
+            "error": "TikTok download failed",
+            "message": f"Network error: {str(e)}",
+            "platform": "tiktok"
+        }), 500
+        
+    except Exception as e:
+        logger.error(f"❌ TikTok processing failed: {e}")
+        return jsonify({
+            "error": "TikTok processing failed", 
+            "message": str(e),
+            "platform": "tiktok"
+        }), 500
 
 
 def get_platform_config(platform):
@@ -273,7 +413,12 @@ def download_video():
 
         # Generate unique filename
         uid = str(uuid.uuid4())[:8]
+
+        # Special handling for TikTok using mobile API emulation
+        if platform == "tiktok":
+            return download_tiktok_video(cleaned_url, uid, start_time)
         
+        # For other platforms, use existing yt-dlp method
         # Get platform-specific configuration
         ydl_opts = get_platform_config(platform)
         ydl_opts["outtmpl"] = os.path.join(DOWNLOAD_DIR, f"{uid}_%(title)s.%(ext)s")
