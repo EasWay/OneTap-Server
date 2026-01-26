@@ -9,6 +9,7 @@ import time
 import requests
 from urllib.parse import urlparse
 from tiktok_mobile_api import TikTokMobileAPI
+from tiktok_config import FALLBACK_CONFIG
 
 logger = logging.getLogger(__name__)
 
@@ -40,9 +41,16 @@ class TikTokExtractor:
         # Extract video ID from URL
         video_id = self._extract_video_id(url)
         if not video_id:
-            return self._error_response("Could not extract video ID from URL")
+            logger.warning(f"⚠️ Could not extract video ID from URL: {url}")
+            # Try fallback extractors that don't require video ID
+            return self._try_fallback_extractors_without_id(url)
         
         logger.info(f"📱 Extracted video ID: {video_id}")
+        
+        # Validate video ID is numeric
+        if not video_id.isdigit():
+            logger.warning(f"⚠️ Video ID is not numeric: {video_id}")
+            return self._try_fallback_extractors_without_id(url)
         
         # Try each extractor until one succeeds
         last_error = None
@@ -68,6 +76,30 @@ class TikTokExtractor:
         # All extractors failed
         logger.error(f"❌ All TikTok extractors failed. Last error: {last_error}")
         return self._error_response(f"All extraction methods failed: {last_error}")
+    
+    def _try_fallback_extractors_without_id(self, url):
+        """Try extractors that don't require video ID"""
+        logger.info("🔄 Trying fallback extractors without video ID requirement")
+        
+        fallback_extractors = [
+            self._extract_via_ytdlp_fallback,
+            self._extract_via_oembed
+        ]
+        
+        for extractor in fallback_extractors:
+            try:
+                logger.info(f"🔄 Trying {extractor.__name__} without video ID")
+                result = extractor(None, url)  # Pass None as video_id
+                
+                if result["success"]:
+                    logger.info(f"✅ Fallback extraction successful with {extractor.__name__}")
+                    return result
+                    
+            except Exception as e:
+                logger.error(f"❌ {extractor.__name__} failed: {e}")
+                continue
+        
+        return self._error_response("Could not extract video ID and all fallback methods failed")
     
     def _extract_video_id(self, url):
         """Extract video ID from various TikTok URL formats"""
@@ -265,17 +297,27 @@ class TikTokExtractor:
         # Use priority order from config
         priority_order = FALLBACK_CONFIG["URL_PRIORITY"]
         
+        logger.info(f"📹 Available video URL types: {list(video_urls.keys())}")
+        
         for url_type in priority_order:
             if url_type in video_urls and video_urls[url_type]:
                 urls = video_urls[url_type]
+                logger.info(f"🔍 Checking {url_type}: {len(urls)} URLs available")
                 
-                # Try each URL in the list until one works
-                for url in urls:
-                    if self._test_video_url(url):
-                        logger.info(f"✅ Selected {url_type} URL: {url[:50]}...")
-                        return url
+                # Return the first URL from this type (they're usually all valid)
+                if urls:
+                    selected_url = urls[0]
+                    logger.info(f"✅ Selected {url_type} URL: {selected_url[:50]}...")
+                    return selected_url
         
-        logger.warning("⚠️ No working video URLs found")
+        # If no URLs found in priority order, try any available URLs
+        for url_type, urls in video_urls.items():
+            if urls:
+                selected_url = urls[0]
+                logger.info(f"✅ Fallback selected {url_type} URL: {selected_url[:50]}...")
+                return selected_url
+        
+        logger.warning("⚠️ No video URLs found in response")
         return None
     
     def _test_video_url(self, url):

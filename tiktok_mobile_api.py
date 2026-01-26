@@ -187,19 +187,36 @@ class TikTokMobileAPI:
             # Make API request
             response_data = self._make_request("/aweme/v1/feed/", params)
             
-            if not response_data or "aweme_list" not in response_data:
+            if not response_data:
+                raise Exception("Empty response from TikTok API")
+            
+            logger.info(f"📡 API Response keys: {list(response_data.keys())}")
+            
+            # Handle different response formats
+            aweme_list = None
+            if "aweme_list" in response_data:
+                aweme_list = response_data["aweme_list"]
+            elif "data" in response_data and isinstance(response_data["data"], list):
+                aweme_list = response_data["data"]
+            elif "aweme_detail" in response_data:
+                aweme_list = [response_data["aweme_detail"]]
+            
+            if not aweme_list:
                 # Try alternative endpoint
                 logger.info("🔄 Trying alternative API endpoint")
                 response_data = self._make_request("/aweme/v2/feed/", params)
                 
-                if not response_data or "aweme_list" not in response_data:
-                    raise Exception("Invalid API response format from all endpoints")
+                if response_data and "aweme_list" in response_data:
+                    aweme_list = response_data["aweme_list"]
+                
+                if not aweme_list:
+                    raise Exception("No video data found in API response")
             
-            aweme_list = response_data["aweme_list"]
             if not aweme_list:
                 raise Exception("Video not found or may be private/deleted")
             
             video_data = aweme_list[0]
+            logger.info(f"📱 Video data keys: {list(video_data.keys()) if isinstance(video_data, dict) else 'Not a dict'}")
             
             # Extract video URLs with fallback chain
             video_urls = self._extract_video_urls(video_data)
@@ -230,34 +247,90 @@ class TikTokMobileAPI:
         }
         
         try:
-            video_info = video_data.get("video", {})
+            logger.info(f"🔍 Extracting video URLs from data with keys: {list(video_data.keys()) if isinstance(video_data, dict) else 'Not a dict'}")
             
-            # Primary: playAddr (highest quality, no watermark)
-            if "play_addr" in video_info:
-                play_addr = video_info["play_addr"]
-                if "url_list" in play_addr:
-                    urls["play_addr"] = play_addr["url_list"]
+            # Try different paths to find video info
+            video_info = None
             
-            # Fallback 1: downloadAddr (may have watermark)
-            if "download_addr" in video_info:
-                download_addr = video_info["download_addr"]
-                if "url_list" in download_addr:
-                    urls["download_addr"] = download_addr["url_list"]
+            if "video" in video_data:
+                video_info = video_data["video"]
+            elif "aweme_info" in video_data and "video" in video_data["aweme_info"]:
+                video_info = video_data["aweme_info"]["video"]
+            elif "item_info" in video_data and "video" in video_data["item_info"]:
+                video_info = video_data["item_info"]["video"]
             
-            # Fallback 2: H264 encoded versions
-            if "play_addr_h264" in video_info:
-                h264_addr = video_info["play_addr_h264"]
-                if "url_list" in h264_addr:
-                    urls["play_addr_h264"] = h264_addr["url_list"]
+            if not video_info:
+                logger.warning("⚠️ No video info found in response")
+                return urls
             
-            # Fallback 3: ByteVC1 encoded versions
-            if "play_addr_bytevc1" in video_info:
-                bytevc1_addr = video_info["play_addr_bytevc1"]
-                if "url_list" in bytevc1_addr:
-                    urls["play_addr_bytevc1"] = bytevc1_addr["url_list"]
+            logger.info(f"📹 Video info keys: {list(video_info.keys()) if isinstance(video_info, dict) else 'Not a dict'}")
+            
+            # Extract URLs from different fields
+            url_fields = [
+                ("play_addr", "play_addr"),
+                ("download_addr", "download_addr"), 
+                ("play_addr_h264", "play_addr_h264"),
+                ("play_addr_bytevc1", "play_addr_bytevc1"),
+                ("bit_rate", "play_addr"),  # Sometimes stored under bit_rate
+                ("play_url", "play_addr"),  # Alternative field name
+                ("download_url", "download_addr")  # Alternative field name
+            ]
+            
+            for field_name, url_type in url_fields:
+                if field_name in video_info:
+                    field_data = video_info[field_name]
+                    
+                    # Handle different data structures
+                    extracted_urls = []
+                    
+                    if isinstance(field_data, dict):
+                        if "url_list" in field_data:
+                            extracted_urls = field_data["url_list"]
+                        elif "uri" in field_data:
+                            # Sometimes URI needs to be converted to full URL
+                            uri = field_data["uri"]
+                            if uri:
+                                # Try common TikTok CDN patterns
+                                cdn_bases = [
+                                    "https://v16-webapp-prime.tiktok.com/video/tos/",
+                                    "https://v19-webapp-prime.tiktok.com/video/tos/",
+                                    "https://v77-webapp-prime.tiktok.com/video/tos/"
+                                ]
+                                for cdn_base in cdn_bases:
+                                    extracted_urls.append(f"{cdn_base}{uri}")
+                        elif "url" in field_data:
+                            extracted_urls = [field_data["url"]]
+                    elif isinstance(field_data, list):
+                        # Handle array of URL objects
+                        for item in field_data:
+                            if isinstance(item, dict):
+                                if "url_list" in item:
+                                    extracted_urls.extend(item["url_list"])
+                                elif "url" in item:
+                                    extracted_urls.append(item["url"])
+                            elif isinstance(item, str):
+                                extracted_urls.append(item)
+                    elif isinstance(field_data, str):
+                        extracted_urls = [field_data]
+                    
+                    if extracted_urls:
+                        # Clean and validate URLs
+                        valid_urls = []
+                        for url in extracted_urls:
+                            if isinstance(url, str) and url.startswith(('http://', 'https://')):
+                                valid_urls.append(url)
+                        
+                        if valid_urls:
+                            urls[url_type].extend(valid_urls)
+                            logger.info(f"✅ Found {len(valid_urls)} URLs for {field_name}")
             
             total_urls = sum(len(v) for v in urls.values())
-            logger.info(f"📹 Extracted {total_urls} video URLs")
+            logger.info(f"📹 Extracted {total_urls} total video URLs")
+            
+            # Log URL types found
+            for url_type, url_list in urls.items():
+                if url_list:
+                    logger.info(f"  {url_type}: {len(url_list)} URLs")
             
             return urls
             
@@ -268,26 +341,72 @@ class TikTokMobileAPI:
     def _extract_metadata(self, video_data):
         """Extract video metadata"""
         try:
-            metadata = {
-                "title": video_data.get("desc", ""),
-                "author": video_data.get("author", {}).get("nickname", ""),
-                "author_username": video_data.get("author", {}).get("unique_id", ""),
-                "duration": video_data.get("video", {}).get("duration", 0),
-                "view_count": video_data.get("statistics", {}).get("play_count", 0),
-                "like_count": video_data.get("statistics", {}).get("digg_count", 0),
-                "comment_count": video_data.get("statistics", {}).get("comment_count", 0),
-                "share_count": video_data.get("statistics", {}).get("share_count", 0),
-                "create_time": video_data.get("create_time", 0),
-                "video_id": video_data.get("aweme_id", ""),
-                "music_title": video_data.get("music", {}).get("title", ""),
-                "music_author": video_data.get("music", {}).get("author", "")
-            }
+            metadata = {}
+            
+            # Extract title/description
+            if "desc" in video_data:
+                metadata["title"] = video_data["desc"]
+            elif "content" in video_data:
+                metadata["title"] = video_data["content"]
+            elif "text" in video_data:
+                metadata["title"] = video_data["text"]
+            else:
+                metadata["title"] = ""
+            
+            # Extract author info
+            author_info = video_data.get("author", {})
+            if not author_info and "user" in video_data:
+                author_info = video_data["user"]
+            
+            metadata["author"] = author_info.get("nickname", author_info.get("display_name", "Unknown"))
+            metadata["author_username"] = author_info.get("unique_id", author_info.get("username", ""))
+            
+            # Extract video info
+            video_info = video_data.get("video", {})
+            metadata["duration"] = video_info.get("duration", 0)
+            
+            # Extract statistics
+            stats = video_data.get("statistics", {})
+            if not stats and "stats" in video_data:
+                stats = video_data["stats"]
+            
+            metadata["view_count"] = stats.get("play_count", stats.get("view_count", 0))
+            metadata["like_count"] = stats.get("digg_count", stats.get("like_count", 0))
+            metadata["comment_count"] = stats.get("comment_count", 0)
+            metadata["share_count"] = stats.get("share_count", 0)
+            
+            # Extract other info
+            metadata["create_time"] = video_data.get("create_time", 0)
+            metadata["video_id"] = video_data.get("aweme_id", video_data.get("item_id", ""))
+            
+            # Extract music info
+            music_info = video_data.get("music", {})
+            if not music_info and "audio" in video_data:
+                music_info = video_data["audio"]
+            
+            metadata["music_title"] = music_info.get("title", "")
+            metadata["music_author"] = music_info.get("author", music_info.get("artist", ""))
+            
+            logger.info(f"📊 Extracted metadata: title='{metadata['title'][:50]}...', author='{metadata['author']}'")
             
             return metadata
             
         except Exception as e:
             logger.error(f"❌ Failed to extract metadata: {e}")
-            return {}
+            return {
+                "title": "",
+                "author": "Unknown",
+                "author_username": "",
+                "duration": 0,
+                "view_count": 0,
+                "like_count": 0,
+                "comment_count": 0,
+                "share_count": 0,
+                "create_time": 0,
+                "video_id": "",
+                "music_title": "",
+                "music_author": ""
+            }
     
     def extract_video_id_from_url(self, url):
         """Extract video ID from various TikTok URL formats"""
@@ -305,14 +424,20 @@ class TikTokMobileAPI:
             if match:
                 video_id = match.group(1)
                 
-                # For short URLs, we need to resolve them first
+                # For short URLs (non-numeric IDs), we need to resolve them first
                 if not video_id.isdigit():
+                    logger.info(f"🔗 Short URL detected with ID: {video_id}")
                     resolved_id = self._resolve_short_url(url)
-                    if resolved_id:
+                    if resolved_id and resolved_id.isdigit():
+                        logger.info(f"✅ Resolved to numeric video ID: {resolved_id}")
                         return resolved_id
+                    else:
+                        logger.warning(f"⚠️ Could not resolve short URL to numeric ID: {url}")
+                        return None
                 
                 return video_id
         
+        logger.warning(f"⚠️ No matching pattern found for URL: {url}")
         return None
     
     def _resolve_short_url(self, short_url):
@@ -339,17 +464,32 @@ class TikTokMobileAPI:
             )
             final_url = response.url
             
-            # Extract video ID from final URL
-            import re
-            match = re.search(r"tiktok\.com/@[^/]+/video/(\d+)", final_url)
-            if match:
-                video_id = match.group(1)
-                logger.info(f"✅ Resolved to video ID: {video_id}")
-                return video_id
+            logger.info(f"🔗 Short URL resolved to: {final_url}")
             
-            logger.warning(f"⚠️ Could not extract video ID from resolved URL: {final_url}")
+            # Extract video ID from final URL using multiple patterns
+            import re
+            patterns = [
+                r"tiktok\.com/@[^/]+/video/(\d+)",  # Standard format
+                r"tiktok\.com/.*?/video/(\d+)",     # Any username format
+                r"/video/(\d+)",                    # Just the video ID part
+                r"aweme_id=(\d+)",                  # Query parameter
+                r"item_id=(\d+)"                    # Alternative parameter
+            ]
+            
+            for pattern in patterns:
+                match = re.search(pattern, final_url)
+                if match:
+                    video_id = match.group(1)
+                    if video_id.isdigit():
+                        logger.info(f"✅ Resolved to video ID: {video_id}")
+                        return video_id
+            
+            logger.warning(f"⚠️ Could not extract numeric video ID from resolved URL: {final_url}")
             return None
             
+        except requests.exceptions.RequestException as e:
+            logger.error(f"❌ Network error resolving short URL: {e}")
+            return None
         except Exception as e:
             logger.error(f"❌ Failed to resolve short URL: {e}")
             return None

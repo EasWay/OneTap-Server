@@ -21,7 +21,16 @@ class DeviceFingerprintManager:
         if persistent_device_id:
             self.device_id = persistent_device_id
             # Seed random with device ID for consistent fingerprints
-            random.seed(int(self.device_id[-10:]))
+            # Convert device ID to integer safely
+            try:
+                if self.device_id.isdigit():
+                    random.seed(int(self.device_id[-10:]))
+                else:
+                    # For non-numeric device IDs, use hash
+                    random.seed(hash(self.device_id) % (2**31))
+            except (ValueError, TypeError):
+                # Fallback to hash-based seed
+                random.seed(hash(str(self.device_id)) % (2**31))
         else:
             self.device_id = self._generate_device_id()
         
@@ -45,9 +54,20 @@ class DeviceFingerprintManager:
     def _generate_install_id(self):
         """Generate realistic install ID (19 digits starting with 7)"""
         # Base on device ID for consistency
-        base = int(self.device_id)
-        install_id = base + random.randint(1000000, 9999999)
-        return str(install_id)[:19]
+        try:
+            if self.device_id.isdigit():
+                base = int(self.device_id)
+                install_id = base + random.randint(1000000, 9999999)
+                return str(install_id)[:19]
+            else:
+                # For non-numeric device IDs, generate based on hash
+                device_hash = hash(self.device_id) % (10**18)
+                base = 7000000000000000000 + device_hash
+                install_id = base + random.randint(1000000, 9999999)
+                return str(install_id)[:19]
+        except (ValueError, TypeError):
+            # Fallback to completely random generation
+            return str(random.randint(7000000000000000000, 7999999999999999999))
     
     def _generate_openudid(self):
         """Generate realistic OpenUDID (32 character hex string)"""
@@ -213,6 +233,10 @@ class DeviceFingerprintManager:
         """Create device fingerprint that's consistent for a specific user"""
         # Generate device ID based on user identifier
         device_seed = hashlib.sha256(user_identifier.encode()).hexdigest()
-        device_id = "7" + device_seed[:18]  # 19 digits starting with 7
+        
+        # Ensure device ID is numeric and starts with 7
+        # Convert hex to int, then format as 19-digit number starting with 7
+        hex_int = int(device_seed[:15], 16)  # Use first 15 hex chars
+        device_id = str(7000000000000000000 + (hex_int % 999999999999999999))
         
         return cls(persistent_device_id=device_id)
