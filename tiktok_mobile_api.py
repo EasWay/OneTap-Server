@@ -133,6 +133,14 @@ class TikTokMobileAPI:
                         # Log the actual response content for debugging
                         response_text = response.text[:500] if response.text else "Empty response"
                         logger.warning(f"📄 Response content (first 500 chars): {response_text}")
+                        
+                        # Try to parse as binary/protobuf-like data
+                        if response.content and len(response.content) > 0:
+                            logger.info("🔍 Attempting to parse binary response")
+                            parsed_data = self._parse_binary_response(response.content)
+                            if parsed_data:
+                                return parsed_data
+                        
                         return {"error": "Invalid JSON response", "raw_response": response_text}
                         
                 elif response.status_code == 403:
@@ -530,4 +538,135 @@ class TikTokMobileAPI:
             return None
         except Exception as e:
             logger.error(f"❌ Failed to resolve short URL: {e}")
+            return None
+    
+    def _parse_binary_response(self, binary_data):
+        """
+        Parse binary/protobuf-like response from TikTok API
+        Extract video URLs and metadata from binary data
+        """
+        try:
+            logger.info("🔍 Parsing binary response data")
+            
+            # Convert binary data to string for pattern matching
+            try:
+                # Try UTF-8 first
+                text_data = binary_data.decode('utf-8', errors='ignore')
+            except:
+                # Fallback to latin-1 which can handle any byte sequence
+                text_data = binary_data.decode('latin-1', errors='ignore')
+            
+            logger.info(f"📄 Binary data length: {len(binary_data)} bytes")
+            logger.info(f"📄 Text data preview: {text_data[:200]}...")
+            
+            # Extract video URLs using regex patterns
+            import re
+            
+            video_urls = {
+                "play_addr": [],
+                "download_addr": [],
+                "play_addr_h264": [],
+                "play_addr_bytevc1": []
+            }
+            
+            # Look for TikTok CDN URLs in the binary data
+            url_patterns = [
+                r'https://[^"\s]*\.tiktokcdn\.com[^"\s]*\.mp4[^"\s]*',
+                r'https://[^"\s]*\.tiktokv\.com[^"\s]*\.mp4[^"\s]*',
+                r'https://v\d+-[^"\s]*\.tiktok\.com[^"\s]*\.mp4[^"\s]*',
+                r'https://[^"\s]*-webapp-prime\.tiktok\.com[^"\s]*',
+                r'https://[^"\s]*\.byteoversea\.com[^"\s]*\.mp4[^"\s]*'
+            ]
+            
+            found_urls = []
+            for pattern in url_patterns:
+                matches = re.findall(pattern, text_data, re.IGNORECASE)
+                found_urls.extend(matches)
+            
+            # Clean and validate URLs
+            valid_urls = []
+            for url in found_urls:
+                # Clean up URL (remove any trailing characters that aren't part of URL)
+                url = re.sub(r'[^\w\-\./:?&=~%]+.*$', '', url)
+                if url.startswith('http') and len(url) > 50:  # Reasonable URL length
+                    valid_urls.append(url)
+            
+            # Remove duplicates
+            valid_urls = list(set(valid_urls))
+            
+            if valid_urls:
+                logger.info(f"🎯 Found {len(valid_urls)} video URLs in binary data")
+                video_urls["play_addr"] = valid_urls
+            
+            # Extract metadata
+            metadata = {}
+            
+            # Extract title - look for text patterns
+            title_patterns = [
+                r'([^�\x00-\x1f]{10,100})(?=�|#|\x00)',  # Text before special chars
+                r'#[a-zA-Z0-9_]+[^�\x00-\x1f]*',  # Hashtag content
+            ]
+            
+            potential_titles = []
+            for pattern in title_patterns:
+                matches = re.findall(pattern, text_data)
+                potential_titles.extend(matches)
+            
+            # Find the most likely title (longest reasonable text)
+            title = ""
+            for candidate in potential_titles:
+                candidate = candidate.strip()
+                if len(candidate) > len(title) and len(candidate) < 200 and candidate.isprintable():
+                    title = candidate
+            
+            metadata["title"] = title if title else "TikTok Video"
+            
+            # Extract username - look for @username pattern or username in the data
+            username_patterns = [
+                r'@([a-zA-Z0-9_.]+)',
+                r'([a-zA-Z0-9_.]{3,30})(?=\x00|\*|�)',  # Username-like strings
+            ]
+            
+            username = "Unknown"
+            for pattern in username_patterns:
+                matches = re.findall(pattern, text_data)
+                for match in matches:
+                    if len(match) >= 3 and len(match) <= 30 and match.replace('_', '').replace('.', '').isalnum():
+                        username = match
+                        break
+                if username != "Unknown":
+                    break
+            
+            metadata["author"] = username
+            
+            # Extract video ID if present
+            video_id_match = re.search(r'(\d{19})', text_data)  # TikTok video IDs are 19 digits
+            if video_id_match:
+                metadata["video_id"] = video_id_match.group(1)
+            
+            logger.info(f"📊 Extracted metadata: title='{metadata['title'][:50]}...', author='{metadata['author']}'")
+            
+            if valid_urls:
+                return {
+                    "aweme_list": [{
+                        "video": {
+                            "play_addr": {"url_list": valid_urls},
+                            "download_addr": {"url_list": valid_urls}
+                        },
+                        "desc": metadata["title"],
+                        "author": {"nickname": metadata["author"]},
+                        "aweme_id": metadata.get("video_id", ""),
+                        "statistics": {
+                            "play_count": 0,
+                            "digg_count": 0,
+                            "comment_count": 0
+                        }
+                    }]
+                }
+            else:
+                logger.warning("⚠️ No video URLs found in binary data")
+                return None
+                
+        except Exception as e:
+            logger.error(f"❌ Failed to parse binary response: {e}")
             return None

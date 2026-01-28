@@ -215,7 +215,14 @@ class TikTokExtractor:
                 r'"embedUrl":"([^"]+)"',
                 # Other patterns
                 r'src="([^"]*v\d+[^"]*\.mp4[^"]*)"',
-                r'data-video-url="([^"]+)"'
+                r'data-video-url="([^"]+)"',
+                # TikTok CDN patterns
+                r'(https://[^"\s]*\.tiktokcdn\.com[^"\s]*\.mp4[^"\s]*)',
+                r'(https://[^"\s]*\.tiktokv\.com[^"\s]*\.mp4[^"\s]*)',
+                r'(https://v\d+-[^"\s]*\.tiktok\.com[^"\s]*)',
+                r'(https://[^"\s]*-webapp-prime\.tiktok\.com[^"\s]*)',
+                # Look for any video-like URLs
+                r'(https://[^"\s]*(?:video|mp4|stream)[^"\s]*)',
             ]
             
             found_urls = []
@@ -228,8 +235,15 @@ class TikTokExtractor:
                     decoded_url = urllib.parse.unquote(match)
                     
                     # Clean up the URL
-                    if decoded_url.startswith('http') and '.mp4' in decoded_url:
+                    if decoded_url.startswith('http') and (
+                        '.mp4' in decoded_url or 
+                        'video' in decoded_url or 
+                        'tiktok' in decoded_url or
+                        'byteoversea' in decoded_url
+                    ):
                         found_urls.append(decoded_url)
+            
+            logger.info(f"🔍 Found {len(found_urls)} potential video URLs via regex patterns")
             
             # Remove duplicates while preserving order
             unique_urls = []
