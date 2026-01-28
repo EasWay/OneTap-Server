@@ -127,9 +127,15 @@ class TikTokExtractor:
             if not video_url:
                 return self._error_response("No valid video URLs found in mobile API response")
             
+            # Store all available URLs for fallback during download
+            all_urls = []
+            for url_type, urls in video_urls.items():
+                all_urls.extend(urls)
+            
             return {
                 "success": True,
                 "video_url": video_url,
+                "fallback_urls": all_urls[:5],  # Limit to 5 fallback URLs
                 "title": metadata.get("title", "TikTok Video"),
                 "author": metadata.get("author", "Unknown"),
                 "duration": metadata.get("duration", 0),
@@ -259,18 +265,33 @@ class TikTokExtractor:
             
             import yt_dlp
             
+            # Use headers that work better with TikTok
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 14_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0.3 Mobile/15E148 Safari/604.1',
+                'Accept': '*/*',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Referer': 'https://www.tiktok.com/',
+                'Origin': 'https://www.tiktok.com',
+                'Sec-Fetch-Dest': 'video',
+                'Sec-Fetch-Mode': 'cors',
+                'Sec-Fetch-Site': 'cross-site'
+            }
+            
             ydl_opts = {
                 "quiet": True,
                 "no_warnings": True,
                 "extract_flat": False,
                 "format": "best",
                 "socket_timeout": 30,
-                'http_headers': {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                    'Accept': '*/*',
-                    'Accept-Language': 'en-US,en;q=0.9',
-                    'Referer': 'https://www.tiktok.com/',
-                }
+                "http_headers": headers,
+                # Add additional options for better success rate
+                "retries": 3,
+                "fragment_retries": 3,
+                "extractor_retries": 2,
+                "file_access_retries": 3,
+                # Disable some features that might cause issues
+                "no_check_certificate": True,
+                "prefer_insecure": False
             }
             
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -280,8 +301,19 @@ class TikTokExtractor:
                     video_url = info["url"]
                     formats = info.get('formats', [])
                     if formats:
-                        best_format = formats[-1]
-                        video_url = best_format.get('url', video_url)
+                        # Find the best format with a direct URL
+                        best_format = None
+                        for fmt in reversed(formats):  # Start from highest quality
+                            if fmt.get('url') and not fmt.get('fragments'):  # Prefer non-fragmented
+                                best_format = fmt
+                                break
+                        
+                        if best_format:
+                            video_url = best_format.get('url', video_url)
+                            # Get format-specific headers if available
+                            format_headers = best_format.get('http_headers', {})
+                            if format_headers:
+                                headers.update(format_headers)
 
                     return {
                         "success": True,
@@ -293,7 +325,7 @@ class TikTokExtractor:
                         "extractor": "ytdlp",
                         "has_watermark": True,
                         "quality": "medium",
-                        "http_headers": info.get('http_headers', ydl_opts['http_headers'])
+                        "http_headers": headers  # Pass headers for download
                     }
             
             return self._error_response("yt-dlp could not extract video URL")

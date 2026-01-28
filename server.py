@@ -152,6 +152,9 @@ def download_tiktok_video(url, uid, start_time):
             }), 400
         
         video_url = extraction_result["video_url"]
+        fallback_urls = extraction_result.get("fallback_urls", [])
+        all_video_urls = [video_url] + [url for url in fallback_urls if url != video_url]
+        
         title = extraction_result.get("title", "TikTok Video")
         author = extraction_result.get("author", "Unknown")
         duration = extraction_result.get("duration", 0)
@@ -162,13 +165,15 @@ def download_tiktok_video(url, uid, start_time):
         quality = extraction_result.get("quality", "medium")
         
         logger.info(f"✅ TikTok extraction successful via {extractor_used}")
-        logger.info(f"📹 Video URL: {video_url[:50]}...")
-        logger.info(f"🎬 Title: {title}")
+        logger.info(f"�  Video URL: {video_url[:50]}...")
+        logger.info(f"� Tuitle: {title}")
         logger.info(f"👤 Author: {author}")
         logger.info(f"💧 Watermark: {'Yes' if has_watermark else 'No'}")
         logger.info(f"🎯 Quality: {quality}")
+        if len(all_video_urls) > 1:
+            logger.info(f"🔄 {len(all_video_urls)-1} fallback URLs available")
         
-        # Download the video file
+        # Download the video file with URL fallback
         logger.info("⬇️ Downloading TikTok video file...")
         
         # Create safe filename
@@ -179,38 +184,126 @@ def download_tiktok_video(url, uid, start_time):
         filename = f"{uid}_{safe_title}.mp4"
         filepath = os.path.join(DOWNLOAD_DIR, filename)
         
-        # Download with progress tracking
-        extraction_headers = extraction_result.get("http_headers", {})
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Linux; Android 13; SM-G998B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Mobile Safari/537.36",
-            "Referer": "https://www.tiktok.com/",
-            "Accept": "*/*",
-            "Accept-Encoding": "identity",
-            "Range": "bytes=0-"
-        }
-        # Merge headers from extraction if provided
-        headers.update(extraction_headers)
+        # Try each URL until one works
+        download_successful = False
+        last_error = None
         
-        response = requests.get(video_url, headers=headers, stream=True, timeout=60)
-        response.raise_for_status()
+        for url_index, current_video_url in enumerate(all_video_urls):
+            try:
+                logger.info(f"🔄 Trying video URL {url_index + 1}/{len(all_video_urls)}")
+                
+                # Use headers from extraction if available, otherwise use mobile-optimized headers
+                extraction_headers = extraction_result.get("http_headers", {})
+                if extraction_headers:
+                    headers = extraction_headers.copy()
+                    logger.info(f"🔧 Using extraction headers: {list(headers.keys())}")
+                else:
+                    headers = {
+                        "User-Agent": "Mozilla/5.0 (Linux; Android 13; SM-G998B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Mobile Safari/537.36",
+                        "Referer": "https://www.tiktok.com/",
+                        "Accept": "*/*",
+                        "Accept-Encoding": "identity"
+                    }
+                
+                # Download with retry logic and proper error handling
+                max_retries = 3
+                retry_delay = 1
+                
+                for attempt in range(max_retries):
+                    try:
+                        logger.info(f"⬇️ Downloading TikTok video file (URL {url_index + 1}, attempt {attempt + 1}/{max_retries})...")
+                        
+                        response = requests.get(
+                            current_video_url, 
+                            headers=headers, 
+                            stream=True, 
+                            timeout=60,
+                            allow_redirects=True
+                        )
+                        response.raise_for_status()
+                        
+                        # If we get here, the request was successful
+                        break
+                        
+                    except requests.exceptions.HTTPError as e:
+                        if e.response.status_code == 403:
+                            logger.warning(f"⚠️ 403 Forbidden on attempt {attempt + 1} - trying different headers")
+                            
+                            # Try with minimal headers on retry
+                            if attempt < max_retries - 1:
+                                headers = {
+                                    "User-Agent": "TikTok 26.2.0 rv:262018 (iPhone; iOS 14.4.2; en_US) Cronet",
+                                    "Accept": "*/*"
+                                }
+                                time.sleep(retry_delay)
+                                retry_delay *= 2  # Exponential backoff
+                                continue
+                            else:
+                                raise Exception(f"Video download failed with 403 Forbidden after {max_retries} attempts")
+                                
+                        elif e.response.status_code == 404:
+                            raise Exception("Video not found (404). The video may have been deleted or the URL is invalid.")
+                            
+                        else:
+                            raise Exception(f"HTTP {e.response.status_code}: {e.response.reason}")
+                            
+                    except requests.exceptions.Timeout:
+                        if attempt < max_retries - 1:
+                            logger.warning(f"⚠️ Download timeout on attempt {attempt + 1} - retrying...")
+                            time.sleep(retry_delay)
+                            retry_delay *= 2
+                            continue
+                        else:
+                            raise Exception("Download timed out after multiple attempts")
+                            
+                    except requests.exceptions.ConnectionError:
+                        if attempt < max_retries - 1:
+                            logger.warning(f"⚠️ Connection error on attempt {attempt + 1} - retrying...")
+                            time.sleep(retry_delay)
+                            retry_delay *= 2
+                            continue
+                        else:
+                            raise Exception("Connection failed after multiple attempts")
+                
+                # Download the file
+                total_size = int(response.headers.get('content-length', 0))
+                downloaded_size = 0
+                
+                with open(filepath, 'wb') as f:
+                    for chunk in response.iter_content(chunk_size=65536):  # 64KB chunks
+                        if chunk:
+                            f.write(chunk)
+                            downloaded_size += len(chunk)
+                            
+                            # Log progress every 2MB
+                            if downloaded_size % (2 * 1024 * 1024) == 0 and total_size > 0:
+                                progress = (downloaded_size / total_size) * 100
+                                logger.info(f"📥 Download progress: {progress:.1f}% ({downloaded_size / (1024*1024):.1f}MB)")
+                
+                # Verify file was downloaded
+                if not os.path.exists(filepath) or os.path.getsize(filepath) == 0:
+                    raise Exception("Downloaded file is empty or missing")
+                
+                download_successful = True
+                logger.info(f"✅ Successfully downloaded using URL {url_index + 1}")
+                break
+                
+            except Exception as e:
+                last_error = str(e)
+                logger.warning(f"⚠️ URL {url_index + 1} failed: {e}")
+                
+                # Clean up partial file if it exists
+                if os.path.exists(filepath):
+                    try:
+                        os.remove(filepath)
+                    except:
+                        pass
+                
+                # Continue to next URL
+                continue
         
-        total_size = int(response.headers.get('content-length', 0))
-        downloaded_size = 0
-        
-        with open(filepath, 'wb') as f:
-            for chunk in response.iter_content(chunk_size=65536):  # 64KB chunks
-                if chunk:
-                    f.write(chunk)
-                    downloaded_size += len(chunk)
-                    
-                    # Log progress every 2MB
-                    if downloaded_size % (2 * 1024 * 1024) == 0 and total_size > 0:
-                        progress = (downloaded_size / total_size) * 100
-                        logger.info(f"📥 Download progress: {progress:.1f}% ({downloaded_size / (1024*1024):.1f}MB)")
-        
-        # Verify file was downloaded
-        if not os.path.exists(filepath) or os.path.getsize(filepath) == 0:
-            raise Exception("Downloaded file is empty or missing")
+        if not download_successful:
+            raise Exception(f"All video URLs failed. Last error: {last_error}")
         
         file_size_mb = os.path.getsize(filepath) / (1024 * 1024)
         download_time = time.time() - start_time
