@@ -264,23 +264,36 @@ class TikTokExtractor:
                 "no_warnings": True,
                 "extract_flat": False,
                 "format": "best",
-                "socket_timeout": 30
+                "socket_timeout": 30,
+                'http_headers': {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    'Accept': '*/*',
+                    'Accept-Language': 'en-US,en;q=0.9',
+                    'Referer': 'https://www.tiktok.com/',
+                }
             }
             
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
                 
                 if info and "url" in info:
+                    video_url = info["url"]
+                    formats = info.get('formats', [])
+                    if formats:
+                        best_format = formats[-1]
+                        video_url = best_format.get('url', video_url)
+
                     return {
                         "success": True,
-                        "video_url": info["url"],
+                        "video_url": video_url,
                         "title": info.get("title", "TikTok Video"),
                         "author": info.get("uploader", "Unknown"),
                         "duration": info.get("duration", 0),
                         "view_count": info.get("view_count", 0),
                         "extractor": "ytdlp",
                         "has_watermark": True,
-                        "quality": "medium"
+                        "quality": "medium",
+                        "http_headers": info.get('http_headers', ydl_opts['http_headers'])
                     }
             
             return self._error_response("yt-dlp could not extract video URL")
