@@ -55,3 +55,9 @@ social_cookies.txt
 
 # Environment variables
 .env
+
+# Replit
+.cache/
+.pythonlibs/
+.local/
+replit_agent/
