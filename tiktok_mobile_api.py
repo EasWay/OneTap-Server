@@ -130,7 +130,10 @@ class TikTokMobileAPI:
                         return response.json()
                     except json.JSONDecodeError:
                         logger.warning("⚠️ Response is not valid JSON")
-                        return {"error": "Invalid JSON response"}
+                        # Log the actual response content for debugging
+                        response_text = response.text[:500] if response.text else "Empty response"
+                        logger.warning(f"📄 Response content (first 500 chars): {response_text}")
+                        return {"error": "Invalid JSON response", "raw_response": response_text}
                         
                 elif response.status_code == 403:
                     logger.warning(f"⚠️ TikTok API blocked request (403) - trying next endpoint")
@@ -192,6 +195,21 @@ class TikTokMobileAPI:
             
             logger.info(f"📡 API Response keys: {list(response_data.keys())}")
             
+            # Debug: log the actual response structure
+            if "error" in response_data:
+                logger.warning(f"🚨 API returned error response: {response_data}")
+                
+                # Check if there's any useful data despite the error
+                if len(response_data) > 1:  # More than just the error key
+                    logger.info("🔍 Found additional data in error response, attempting extraction...")
+                else:
+                    # If it's just an error, try alternative endpoint immediately
+                    logger.info("🔄 Trying alternative API endpoint")
+                    response_data = self._make_request("/aweme/v2/feed/", params)
+                    
+                    if not response_data or "error" in response_data:
+                        raise Exception("No video data found in API response")
+            
             # Handle different response formats
             aweme_list = None
             if "aweme_list" in response_data:
@@ -202,12 +220,32 @@ class TikTokMobileAPI:
                 aweme_list = [response_data["aweme_detail"]]
             
             if not aweme_list:
-                # Try alternative endpoint
-                logger.info("🔄 Trying alternative API endpoint")
-                response_data = self._make_request("/aweme/v2/feed/", params)
+                # Try alternative endpoint with different parameters
+                logger.info("🔄 Trying alternative API endpoint with different parameters")
                 
-                if response_data and "aweme_list" in response_data:
+                # Try different parameter combinations
+                alt_params = self._build_common_params()
+                alt_params.update({
+                    "aweme_id": video_id,
+                    "pull_type": "1",  # Different pull type
+                    "count": "1",
+                    "max_cursor": "0"
+                })
+                
+                response_data = self._make_request("/aweme/v1/aweme/detail/", alt_params)
+                
+                if response_data and "aweme_detail" in response_data:
+                    aweme_list = [response_data["aweme_detail"]]
+                elif response_data and "aweme_list" in response_data:
                     aweme_list = response_data["aweme_list"]
+                
+                # If still no data, try the v2 endpoint
+                if not aweme_list:
+                    logger.info("🔄 Trying v2 API endpoint")
+                    response_data = self._make_request("/aweme/v2/feed/", params)
+                    
+                    if response_data and "aweme_list" in response_data:
+                        aweme_list = response_data["aweme_list"]
                 
                 if not aweme_list:
                     raise Exception("No video data found in API response")

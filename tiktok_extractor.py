@@ -26,6 +26,8 @@ class TikTokExtractor:
         # Fallback extractors in order of preference
         self.extractors = [
             self._extract_via_mobile_api,
+            self._extract_via_web_scraping,  # New web scraping method
+            self._extract_via_direct_construction,  # Try to construct URLs directly
             self._extract_via_web_api,
             self._extract_via_oembed,
             self._extract_via_ytdlp_fallback
@@ -82,6 +84,7 @@ class TikTokExtractor:
         logger.info("🔄 Trying fallback extractors without video ID requirement")
         
         fallback_extractors = [
+            self._extract_via_web_scraping,
             self._extract_via_ytdlp_fallback,
             self._extract_via_oembed
         ]
@@ -149,6 +152,241 @@ class TikTokExtractor:
         except Exception as e:
             logger.error(f"❌ Mobile API extraction failed: {e}")
             return self._error_response(f"Mobile API failed: {e}")
+    
+    def _extract_via_web_scraping(self, video_id, url):
+        """
+        Fallback 1.5: Web scraping approach
+        Scrapes the TikTok web page directly to extract video URLs
+        """
+        try:
+            logger.info("🕷️ Using TikTok web scraping fallback")
+            
+            # Construct the full TikTok URL if we have video_id
+            if video_id and video_id.isdigit():
+                # Try to construct a proper TikTok URL
+                scrape_url = url
+            else:
+                scrape_url = url
+            
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.5",
+                "Accept-Encoding": "gzip, deflate, br",
+                "DNT": "1",
+                "Connection": "keep-alive",
+                "Upgrade-Insecure-Requests": "1",
+                "Sec-Fetch-Dest": "document",
+                "Sec-Fetch-Mode": "navigate",
+                "Sec-Fetch-Site": "none",
+                "Cache-Control": "max-age=0"
+            }
+            
+            # First, resolve the URL if it's a short URL
+            if 'vt.tiktok.com' in scrape_url or 'vm.tiktok.com' in scrape_url:
+                logger.info(f"🔗 Resolving short URL: {scrape_url}")
+                response = self.session.head(scrape_url, headers=headers, allow_redirects=True, timeout=15)
+                scrape_url = response.url
+                logger.info(f"🔗 Resolved to: {scrape_url}")
+            
+            # Now scrape the actual TikTok page
+            response = self.session.get(scrape_url, headers=headers, timeout=20)
+            
+            if response.status_code != 200:
+                return self._error_response(f"Failed to load TikTok page: HTTP {response.status_code}")
+            
+            html_content = response.text
+            
+            # Extract video URLs using regex patterns
+            import re
+            
+            # Look for various video URL patterns in the HTML
+            video_patterns = [
+                # Direct video URLs
+                r'"playAddr":"([^"]+)"',
+                r'"downloadAddr":"([^"]+)"',
+                r'"url":"(https://[^"]*\.mp4[^"]*)"',
+                r'"videoUrl":"([^"]+)"',
+                # Encoded URLs
+                r'playAddr%22%3A%22([^%]+)%22',
+                r'downloadAddr%22%3A%22([^%]+)%22',
+                # JSON-LD structured data
+                r'"contentUrl":"([^"]+\.mp4[^"]*)"',
+                r'"embedUrl":"([^"]+)"',
+                # Other patterns
+                r'src="([^"]*v\d+[^"]*\.mp4[^"]*)"',
+                r'data-video-url="([^"]+)"'
+            ]
+            
+            found_urls = []
+            
+            for pattern in video_patterns:
+                matches = re.findall(pattern, html_content, re.IGNORECASE)
+                for match in matches:
+                    # Decode URL if it's encoded
+                    import urllib.parse
+                    decoded_url = urllib.parse.unquote(match)
+                    
+                    # Clean up the URL
+                    if decoded_url.startswith('http') and '.mp4' in decoded_url:
+                        found_urls.append(decoded_url)
+            
+            # Remove duplicates while preserving order
+            unique_urls = []
+            for url in found_urls:
+                if url not in unique_urls:
+                    unique_urls.append(url)
+            
+            if not unique_urls:
+                # Try to extract from SIGI_STATE or __NEXT_DATA__
+                sigi_patterns = [
+                    r'window\.__SIGI_STATE__\s*=\s*({.+?});',
+                    r'window\.__NEXT_DATA__\s*=\s*({.+?});'
+                ]
+                
+                for sigi_pattern in sigi_patterns:
+                    match = re.search(sigi_pattern, html_content)
+                    if match:
+                        try:
+                            import json
+                            data = json.loads(match.group(1))
+                            
+                            # Navigate through the data structure to find video URLs
+                            video_urls = self._extract_urls_from_sigi_data(data)
+                            if video_urls:
+                                unique_urls.extend(video_urls)
+                                break
+                        except:
+                            continue
+            
+            if unique_urls:
+                logger.info(f"🕷️ Found {len(unique_urls)} video URLs via web scraping")
+                
+                # Try to extract title and author from HTML
+                title_match = re.search(r'<title>([^<]+)</title>', html_content, re.IGNORECASE)
+                title = title_match.group(1) if title_match else "TikTok Video"
+                
+                # Clean up title
+                title = title.replace(' | TikTok', '').strip()
+                
+                author_patterns = [
+                    r'"author":"([^"]+)"',
+                    r'"uniqueId":"([^"]+)"',
+                    r'@([a-zA-Z0-9_.]+)',
+                ]
+                
+                author = "Unknown"
+                for pattern in author_patterns:
+                    match = re.search(pattern, html_content)
+                    if match:
+                        author = match.group(1)
+                        break
+                
+                return {
+                    "success": True,
+                    "video_url": unique_urls[0],  # Use the first URL as primary
+                    "fallback_urls": unique_urls[1:5],  # Store others as fallbacks
+                    "title": title,
+                    "author": author,
+                    "extractor": "web_scraping",
+                    "has_watermark": True,
+                    "quality": "medium"
+                }
+            
+            return self._error_response("No video URLs found in web page")
+            
+        except Exception as e:
+            logger.error(f"❌ Web scraping extraction failed: {e}")
+            return self._error_response(f"Web scraping failed: {e}")
+    
+    def _extract_urls_from_sigi_data(self, data):
+        """Extract video URLs from SIGI_STATE or __NEXT_DATA__ structure"""
+        urls = []
+        
+        def recursive_search(obj, path=""):
+            if isinstance(obj, dict):
+                for key, value in obj.items():
+                    if key in ['playAddr', 'downloadAddr', 'url_list', 'videoUrl'] and isinstance(value, (str, list)):
+                        if isinstance(value, str) and value.startswith('http') and '.mp4' in value:
+                            urls.append(value)
+                        elif isinstance(value, list):
+                            for item in value:
+                                if isinstance(item, str) and item.startswith('http') and '.mp4' in item:
+                                    urls.append(item)
+                    else:
+                        recursive_search(value, f"{path}.{key}")
+            elif isinstance(obj, list):
+                for i, item in enumerate(obj):
+                    recursive_search(item, f"{path}[{i}]")
+        
+        recursive_search(data)
+        return urls
+    
+    def _extract_via_direct_construction(self, video_id, url):
+        """
+        Fallback 2: Direct URL construction
+        Try to construct video URLs using known TikTok CDN patterns
+        """
+        try:
+            logger.info("🔧 Using direct URL construction fallback")
+            
+            if not video_id or not video_id.isdigit():
+                return self._error_response("Video ID required for direct construction")
+            
+            # Common TikTok CDN patterns
+            cdn_patterns = [
+                "https://v16-webapp-prime.tiktok.com/video/tos/maliva/tos-maliva-ve-0068c799-us/",
+                "https://v19-webapp-prime.tiktok.com/video/tos/maliva/tos-maliva-ve-0068c799-us/",
+                "https://v77-webapp-prime.tiktok.com/video/tos/maliva/tos-maliva-ve-0068c799-us/",
+                "https://v16-web.tiktok.com/video/tos/maliva/tos-maliva-ve-0068c799-us/",
+                "https://v19-web.tiktok.com/video/tos/maliva/tos-maliva-ve-0068c799-us/"
+            ]
+            
+            # Try to construct URLs with different patterns
+            constructed_urls = []
+            
+            for cdn_base in cdn_patterns:
+                # Generate some common URL patterns
+                patterns = [
+                    f"{cdn_base}{video_id}/?a=1988&ch=0&cr=3&dr=0&lr=all&cd=0%7C0%7C0%7C&cv=1&br=2732&bt=1366&cs=2&ds=4",
+                    f"{cdn_base}o{video_id}/?a=1988&ch=0&cr=3&dr=0&lr=all",
+                    f"{cdn_base}{video_id}.mp4"
+                ]
+                constructed_urls.extend(patterns)
+            
+            # Test each constructed URL
+            headers = {
+                "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 14_6 like Mac OS X) AppleWebKit/605.1.15",
+                "Referer": "https://www.tiktok.com/",
+                "Accept": "*/*"
+            }
+            
+            for test_url in constructed_urls:
+                try:
+                    # Quick HEAD request to test if URL is valid
+                    response = requests.head(test_url, headers=headers, timeout=5)
+                    if response.status_code == 200:
+                        content_type = response.headers.get('content-type', '')
+                        if 'video' in content_type or 'mp4' in content_type:
+                            logger.info(f"✅ Found working constructed URL")
+                            
+                            return {
+                                "success": True,
+                                "video_url": test_url,
+                                "title": "TikTok Video",
+                                "author": "Unknown",
+                                "extractor": "direct_construction",
+                                "has_watermark": True,
+                                "quality": "medium"
+                            }
+                except:
+                    continue
+            
+            return self._error_response("No working URLs could be constructed")
+            
+        except Exception as e:
+            logger.error(f"❌ Direct construction failed: {e}")
+            return self._error_response(f"Direct construction failed: {e}")
     
     def _extract_via_web_api(self, video_id, url):
         """
