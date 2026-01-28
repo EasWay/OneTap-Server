@@ -627,16 +627,25 @@ def cleanup_downloads():
 
 
 def get_port():
-    """Get port from environment or use default"""
-    return int(os.environ.get("PORT", 10000))
+    """Get port from environment or find an available one"""
+    # Prefer RENDER's PORT environment variable
+    if os.environ.get("PORT"):
+        return int(os.environ.get("PORT"))
+    
+    # In local/Replit development, default to 5000 if not specified
+    # However, user requested to find an available port for Render
+    # Flask app.run(port=0) or not specifying port usually lets OS decide,
+    # but we need to know it for the logs.
+    return int(os.environ.get("PORT", 0))
 
 
 if __name__ == "__main__":
     port = get_port()
-    logger.info(f"🚀 Starting OneTap Social Media Downloader on port {port}")
+    logger.info(f"🚀 Starting OneTap Social Media Downloader")
     logger.info(f"📁 Download directory: {DOWNLOAD_DIR}")
     logger.info(f"🍪 Cookies file: {SOCIAL_COOKIES_FILE}")
     logger.info(f"🌍 Environment: {'Render' if IS_RENDER else 'Local'}")
     logger.info(f"✅ Supported platforms: TikTok, Facebook, Instagram, Twitter")
     
-    app.run(host="0.0.0.0", port=port, debug=False)
+    # If port is 0, Flask will pick an available port
+    app.run(host="0.0.0.0", port=port if port != 0 else None, debug=False)
