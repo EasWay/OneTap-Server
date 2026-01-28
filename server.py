@@ -130,6 +130,7 @@ def download_tiktok_video(url, uid, start_time):
     """
     Download TikTok video using mobile API emulation with aggressive fallback
     """
+    platform = "tiktok"
     try:
         logger.info("🎯 Using TikTok Mobile API Emulation")
         
@@ -179,6 +180,7 @@ def download_tiktok_video(url, uid, start_time):
         filepath = os.path.join(DOWNLOAD_DIR, filename)
         
         # Download with progress tracking
+        extraction_headers = extraction_result.get("http_headers", {})
         headers = {
             "User-Agent": "Mozilla/5.0 (Linux; Android 13; SM-G998B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Mobile Safari/537.36",
             "Referer": "https://www.tiktok.com/",
@@ -186,6 +188,8 @@ def download_tiktok_video(url, uid, start_time):
             "Accept-Encoding": "identity",
             "Range": "bytes=0-"
         }
+        # Merge headers from extraction if provided
+        headers.update(extraction_headers)
         
         response = requests.get(video_url, headers=headers, stream=True, timeout=60)
         response.raise_for_status()
@@ -511,8 +515,10 @@ def download_video():
     except Exception as e:
         logger.error(f"❌ Unexpected error: {str(e)}")
         logger.exception("Full error traceback:")
+        platform = locals().get('platform', 'unknown')
         return jsonify({
-            "error": f"Server error: {str(e)}"
+            "error": f"Server error: {str(e)}",
+            "platform": platform
         }), 500
 
 
