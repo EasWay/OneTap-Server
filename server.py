@@ -49,21 +49,67 @@ class J2Extractor:
         return session
     
     def _handshake(self, session):
-        """Perform handshake to get CSRF token"""
+        """Perform handshake to get CSRF token with robust extraction"""
         try:
             logger.info("🤝 Handshaking with j2download.com...")
-            home_response = session.get(self.base_url, timeout=10)
+            
+            # Set navigation headers (simulate typing URL in browser)
+            nav_headers = {
+                "User-Agent": self.user_agent,
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.9",
+                "Sec-Ch-Ua": '"Not(A:Brand";v="8", "Chromium";v="144", "Google Chrome";v="144"',
+                "Sec-Ch-Ua-Mobile": "?0",
+                "Sec-Ch-Ua-Platform": '"Windows"',
+                "Sec-Fetch-Dest": "document",
+                "Sec-Fetch-Mode": "navigate",
+                "Sec-Fetch-Site": "none",
+                "Sec-Fetch-User": "?1",
+                "Upgrade-Insecure-Requests": "1"
+            }
+            
+            # Temporarily update headers for navigation
+            original_headers = session.headers.copy()
+            session.headers.update(nav_headers)
+            
+            home_response = session.get(self.base_url, timeout=15)
             home_response.raise_for_status()
             
-            # Extract CSRF token from cookies
+            # Restore original headers
+            session.headers = original_headers
+            
+            # Priority 1: Extract CSRF token from cookies
             csrf_token = session.cookies.get("csrf_token")
+            
+            # Priority 2: Extract from HTML meta tags
+            if not csrf_token:
+                logger.info("🔍 Searching HTML for CSRF token...")
+                meta_match = re.search(r'<meta\s+name="csrf-token"\s+content="([^"]+)"', home_response.text)
+                if meta_match:
+                    csrf_token = meta_match.group(1)
+                    logger.info("✅ Found CSRF token in Meta Tag")
+            
+            # Priority 3: Extract from JavaScript variables
+            if not csrf_token:
+                js_match = re.search(r'csrf_token\s*=\s*["\']([^"\']+)["\']', home_response.text)
+                if js_match:
+                    csrf_token = js_match.group(1)
+                    logger.info("✅ Found CSRF token in JS")
+            
+            # Priority 4: Look for Laravel token pattern
+            if not csrf_token:
+                laravel_match = re.search(r'_token["\']?\s*:\s*["\']([^"\']+)["\']', home_response.text)
+                if laravel_match:
+                    csrf_token = laravel_match.group(1)
+                    logger.info("✅ Found Laravel token")
+            
             if csrf_token:
                 session.headers.update({"x-csrf-token": csrf_token})
-                logger.info(f"✅ Acquired CSRF Token: {csrf_token}")
+                logger.info(f"✅ Acquired CSRF Token: {csrf_token[:10]}...")
                 return True
             else:
-                logger.warning("⚠️ No CSRF token found in cookies")
-                return False
+                logger.warning("⚠️ No CSRF token found - proceeding without token")
+                return True  # Continue anyway, some endpoints might work without token
                 
         except Exception as e:
             logger.error(f"❌ Handshake failed: {e}")
@@ -82,6 +128,18 @@ class J2Extractor:
             if not self._handshake(session):
                 return {"success": False, "error": "Handshake failed"}
             
+            # Update headers for API call (XHR mode)
+            api_headers = {
+                "Referer": f"{self.base_url}/",
+                "Origin": self.base_url,
+                "Content-Type": "application/json",
+                "Accept": "application/json, text/plain, */*",
+                "Sec-Fetch-Dest": "empty",
+                "Sec-Fetch-Mode": "cors",
+                "Sec-Fetch-Site": "same-origin"
+            }
+            session.headers.update(api_headers)
+            
             # Make API call
             payload = {"url": url}
             logger.info(f"🚀 Sending payload to {self.api_url}")
@@ -89,7 +147,7 @@ class J2Extractor:
             response = session.post(self.api_url, json=payload, timeout=30)
             
             if response.status_code != 200:
-                logger.error(f"❌ J2Download API Error: {response.status_code} - {response.text}")
+                logger.error(f"❌ J2Download API Error: {response.status_code} - {response.text[:200]}")
                 return {"success": False, "error": f"API error: {response.status_code}"}
             
             data = response.json()
