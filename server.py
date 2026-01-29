@@ -141,89 +141,66 @@ class J2Extractor:
             }
             session.headers.update(api_headers)
             
-            # Try original URL first
-            urls_to_try = [url]
+            # For J2Download, we need the FULL URL with all parameters intact
+            # Don't clean or modify the URL - use it exactly as provided after expansion
+            logger.info(f"🚀 Using full URL for J2Download: {url}")
             
-            # If it's a short URL, also try the expanded version
-            if any(domain in url for domain in ['vt.tiktok.com', 'vm.tiktok.com', 't.co', 'bit.ly', 'tinyurl.com']):
+            # Make API call
+            payload = {"url": url}
+            logger.info(f"🚀 Sending payload to {self.api_url}")
+            
+            response = session.post(self.api_url, json=payload, timeout=30)
+            
+            if response.status_code != 200:
+                logger.error(f"❌ J2Download API Error: {response.status_code}")
                 try:
-                    expanded_url = expand_short_url(url)
-                    if expanded_url != url:
-                        urls_to_try.append(expanded_url)
+                    error_data = response.json()
+                    logger.error(f"❌ Error response: {error_data}")
                 except:
-                    pass
+                    logger.error(f"❌ Raw error response: {response.text[:500]}")
+                return {"success": False, "error": f"API error: {response.status_code}"}
             
-            last_error = None
+            data = response.json()
             
-            for attempt_url in urls_to_try:
-                try:
-                    # Make API call
-                    payload = {"url": attempt_url}
-                    logger.info(f"🚀 Sending payload to {self.api_url} with URL: {attempt_url}")
-                    
-                    response = session.post(self.api_url, json=payload, timeout=30)
-                    
-                    if response.status_code != 200:
-                        logger.error(f"❌ J2Download API Error: {response.status_code}")
-                        try:
-                            error_data = response.json()
-                            logger.error(f"❌ Error response: {error_data}")
-                        except:
-                            logger.error(f"❌ Raw error response: {response.text[:500]}")
-                        last_error = f"API error: {response.status_code}"
-                        continue
-                    
-                    data = response.json()
-                    
-                    # Check for API-level errors
-                    if data.get("error") is True or "error" in data:
-                        error_msg = data.get("message", data.get("error", "Unknown API error"))
-                        logger.warning(f"⚠️ J2Download API returned error: {error_msg}")
-                        last_error = f"J2 API Error: {error_msg}"
-                        continue
-                    
-                    medias = data.get("medias", [])
-                    
-                    # Debugging: Log response if medias is empty
-                    if not medias:
-                        logger.warning(f"⚠️ Empty media response for URL: {attempt_url}")
-                        logger.warning(f"⚠️ Full API response: {data}")
-                        last_error = "No media found in response"
-                        continue
-                    
-                    logger.info(f"✅ Found {len(medias)} media items from J2Download")
-                    
-                    # Find best video format
-                    best_video = None
-                    for media in medias:
-                        # Prioritize video type with audio
-                        if media.get("type") == "video" and (media.get("is_audio") or media.get("audioQuality")):
-                            best_video = media
-                            break
-                    
-                    # Fallback to first available
-                    if not best_video:
-                        best_video = medias[0]
-                    
-                    return {
-                        "success": True,
-                        "video_url": best_video.get("url"),
-                        "title": data.get("title", "Video"),
-                        "extension": best_video.get("extension", "mp4"),
-                        "thumbnail": data.get("thumbnail"),
-                        "quality": best_video.get("quality", "unknown"),
-                        "has_audio": best_video.get("is_audio", True),
-                        "file_size": best_video.get("size"),
-                        "extractor": "j2download"
-                    }
-                    
-                except Exception as e:
-                    logger.warning(f"⚠️ Attempt with URL {attempt_url} failed: {e}")
-                    last_error = str(e)
-                    continue
+            # Check for API-level errors first
+            if data.get("error") is True:
+                error_msg = data.get("message", "Unknown API error")
+                logger.warning(f"⚠️ J2Download API returned error: {error_msg}")
+                return {"success": False, "error": f"J2 API Error: {error_msg}"}
             
-            # If we get here, all attempts failed
-            return {"success": False, "error": last_error or "All URL attempts failed"}
+            medias = data.get("medias", [])
+            
+            # Debugging: Log response if medias is empty
+            if not medias:
+                logger.warning(f"⚠️ Empty media response from J2Download")
+                logger.warning(f"⚠️ Full API response: {data}")
+                return {"success": False, "error": "No media found in response"}
+            
+            logger.info(f"✅ Found {len(medias)} media items from J2Download")
+            
+            # Find best video format
+            best_video = None
+            for media in medias:
+                # Prioritize video type with audio
+                if media.get("type") == "video" and (media.get("is_audio") or media.get("audioQuality")):
+                    best_video = media
+                    break
+            
+            # Fallback to first available
+            if not best_video:
+                best_video = medias[0]
+            
+            return {
+                "success": True,
+                "video_url": best_video.get("url"),
+                "title": data.get("title", "Video"),
+                "extension": best_video.get("extension", "mp4"),
+                "thumbnail": data.get("thumbnail"),
+                "quality": best_video.get("quality", "unknown"),
+                "has_audio": best_video.get("is_audio", True),
+                "file_size": best_video.get("size"),
+                "extractor": "j2download"
+            }
             
         except requests.exceptions.Timeout:
             logger.error("❌ J2Download API timeout")
@@ -809,7 +786,14 @@ def download_video():
         # STRATEGY 1: Try J2Extractor first (Primary Method - Fast & Supports 100+ sites)
         logger.info("🎯 Trying J2Extractor (Primary Method)...")
         j2_extractor = J2Extractor()
-        j2_result = j2_extractor.extract_video_info(cleaned_url)
+        
+        # For J2Download, use the expanded URL with ALL parameters intact
+        j2_url = url
+        if any(domain in url for domain in ['vt.tiktok.com', 'vm.tiktok.com']):
+            j2_url = expand_short_url(url)
+            logger.info(f"🔗 Using expanded URL for J2Download: {j2_url}")
+        
+        j2_result = j2_extractor.extract_video_info(j2_url)
         
         if j2_result["success"]:
             try:
