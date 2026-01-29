@@ -17,6 +17,162 @@ from flask_cors import CORS
 from urllib.parse import urlparse, parse_qs
 from tiktok_extractor import TikTokExtractor
 
+
+class J2Extractor:
+    """
+    J2Download.com API wrapper for fast video extraction from 100+ sites
+    """
+    
+    def __init__(self):
+        self.base_url = "https://j2download.com"
+        self.api_url = f"{self.base_url}/api/autolink"
+        self.user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36"
+        self.session = None
+        
+    def _create_session(self):
+        """Create a new session with browser-like headers"""
+        session = requests.Session()
+        session.headers.update({
+            "User-Agent": self.user_agent,
+            "Referer": f"{self.base_url}/",
+            "Origin": self.base_url,
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Sec-Ch-Ua": '"Not(A:Brand";v="8", "Chromium";v="144", "Google Chrome";v="144"',
+            "Sec-Ch-Ua-Mobile": "?0",
+            "Sec-Ch-Ua-Platform": '"Windows"',
+            "Sec-Fetch-Dest": "empty",
+            "Sec-Fetch-Mode": "cors",
+            "Sec-Fetch-Site": "same-origin",
+            "Dnt": "1"
+        })
+        return session
+    
+    def _handshake(self, session):
+        """Perform handshake to get CSRF token"""
+        try:
+            logger.info("🤝 Handshaking with j2download.com...")
+            home_response = session.get(self.base_url, timeout=10)
+            home_response.raise_for_status()
+            
+            # Extract CSRF token from cookies
+            csrf_token = session.cookies.get("csrf_token")
+            if csrf_token:
+                session.headers.update({"x-csrf-token": csrf_token})
+                logger.info(f"✅ Acquired CSRF Token: {csrf_token}")
+                return True
+            else:
+                logger.warning("⚠️ No CSRF token found in cookies")
+                return False
+                
+        except Exception as e:
+            logger.error(f"❌ Handshake failed: {e}")
+            return False
+    
+    def extract_video_info(self, url):
+        """
+        Extract video information using J2Download API
+        Returns: dict with success, video_url, title, etc.
+        """
+        try:
+            # Create fresh session for each request
+            session = self._create_session()
+            
+            # Perform handshake
+            if not self._handshake(session):
+                return {"success": False, "error": "Handshake failed"}
+            
+            # Make API call
+            payload = {"url": url}
+            logger.info(f"🚀 Sending payload to {self.api_url}")
+            
+            response = session.post(self.api_url, json=payload, timeout=30)
+            
+            if response.status_code != 200:
+                logger.error(f"❌ J2Download API Error: {response.status_code} - {response.text}")
+                return {"success": False, "error": f"API error: {response.status_code}"}
+            
+            data = response.json()
+            medias = data.get("medias", [])
+            
+            if not medias:
+                return {"success": False, "error": "No media found in response"}
+            
+            # Find best video format
+            best_video = None
+            for media in medias:
+                # Prioritize video type with audio
+                if media.get("type") == "video" and (media.get("is_audio") or media.get("audioQuality")):
+                    best_video = media
+                    break
+            
+            # Fallback to first available
+            if not best_video:
+                best_video = medias[0]
+            
+            return {
+                "success": True,
+                "video_url": best_video.get("url"),
+                "title": data.get("title", "Video"),
+                "extension": best_video.get("extension", "mp4"),
+                "thumbnail": data.get("thumbnail"),
+                "quality": best_video.get("quality", "unknown"),
+                "has_audio": best_video.get("is_audio", True),
+                "file_size": best_video.get("size"),
+                "extractor": "j2download"
+            }
+            
+        except requests.exceptions.Timeout:
+            logger.error("❌ J2Download API timeout")
+            return {"success": False, "error": "API timeout"}
+        except requests.exceptions.RequestException as e:
+            logger.error(f"❌ J2Download API request failed: {e}")
+            return {"success": False, "error": f"Request failed: {str(e)}"}
+        except Exception as e:
+            logger.error(f"❌ J2Download extraction failed: {e}")
+            return {"success": False, "error": str(e)}
+    
+    def download_video(self, video_url, filepath, headers=None):
+        """
+        Download video file from direct URL
+        """
+        try:
+            if not headers:
+                headers = {
+                    "User-Agent": self.user_agent,
+                    "Referer": self.base_url,
+                    "Accept": "*/*"
+                }
+            
+            logger.info(f"⬇️ Downloading video from J2Download...")
+            
+            response = requests.get(video_url, headers=headers, stream=True, timeout=60)
+            response.raise_for_status()
+            
+            total_size = int(response.headers.get('content-length', 0))
+            downloaded_size = 0
+            
+            with open(filepath, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=65536):  # 64KB chunks
+                    if chunk:
+                        f.write(chunk)
+                        downloaded_size += len(chunk)
+                        
+                        # Log progress every 2MB
+                        if downloaded_size % (2 * 1024 * 1024) == 0 and total_size > 0:
+                            progress = (downloaded_size / total_size) * 100
+                            logger.info(f"📥 Download progress: {progress:.1f}% ({downloaded_size / (1024*1024):.1f}MB)")
+            
+            # Verify file was downloaded
+            if not os.path.exists(filepath) or os.path.getsize(filepath) == 0:
+                raise Exception("Downloaded file is empty or missing")
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ J2Download video download failed: {e}")
+            return False
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -399,8 +555,13 @@ def index():
     return jsonify({
         "status": "online",
         "service": "OneTap Social Media Video Downloader",
-        "version": "2.1.0",
-        "supported_platforms": ["tiktok", "facebook", "instagram", "twitter"],
+        "version": "2.2.0",
+        "supported_platforms": ["tiktok", "facebook", "instagram", "twitter", "youtube", "100+ others"],
+        "extraction_methods": {
+            "primary": "J2Download API (Fast, 100+ sites)",
+            "backup_tiktok": "TikTok Mobile API Emulation",
+            "backup_others": "yt-dlp"
+        },
         "environment": "render" if IS_RENDER else "local",
         "cookies_loaded": os.path.exists(SOCIAL_COOKIES_FILE),
         "endpoints": {
@@ -511,17 +672,71 @@ def download_video():
         # Generate unique filename
         uid = str(uuid.uuid4())[:8]
 
-        # Special handling for TikTok using mobile API emulation
+        # STRATEGY 1: Try J2Extractor first (Primary Method - Fast & Supports 100+ sites)
+        logger.info("🎯 Trying J2Extractor (Primary Method)...")
+        j2_extractor = J2Extractor()
+        j2_result = j2_extractor.extract_video_info(cleaned_url)
+        
+        if j2_result["success"]:
+            try:
+                # Create safe filename
+                title = j2_result.get("title", "Video")
+                safe_title = "".join(c for c in title if c.isalnum() or c in (' ', '-', '_')).strip()
+                if not safe_title:
+                    safe_title = "Video"
+                
+                extension = j2_result.get("extension", "mp4")
+                filename = f"{uid}_{safe_title}.{extension}"
+                filepath = os.path.join(DOWNLOAD_DIR, filename)
+                
+                # Download video using J2Extractor
+                if j2_extractor.download_video(j2_result["video_url"], filepath):
+                    file_size_mb = os.path.getsize(filepath) / (1024 * 1024)
+                    download_time = time.time() - start_time
+                    
+                    # Build download URL
+                    base_url = request.host_url.rstrip("/")
+                    if IS_RENDER:
+                        base_url = base_url.replace("http://", "https://")
+                    
+                    logger.info(f"✅ J2Extractor download complete: {filename} ({download_time:.2f}s, {file_size_mb:.2f}MB)")
+                    
+                    return jsonify({
+                        "status": "success",
+                        "message": "Download successful via J2Extractor",
+                        "platform": platform,
+                        "title": title,
+                        "filename": filename,
+                        "download_url": f"{base_url}/files/{filename}",
+                        "download_time": round(download_time, 2),
+                        "file_size_mb": round(file_size_mb, 2),
+                        "extractor": "j2download",
+                        "quality": j2_result.get("quality", "unknown"),
+                        "has_audio": j2_result.get("has_audio", True),
+                        "environment": "render" if IS_RENDER else "local",
+                        "method": "primary"
+                    })
+                else:
+                    logger.warning("⚠️ J2Extractor download failed, trying backup methods...")
+            except Exception as e:
+                logger.warning(f"⚠️ J2Extractor processing failed: {e}, trying backup methods...")
+        else:
+            logger.warning(f"⚠️ J2Extractor failed: {j2_result.get('error', 'Unknown error')}, trying backup methods...")
+
+        # STRATEGY 2: Special handling for TikTok using mobile API emulation (Backup for TikTok)
         if platform == "tiktok":
+            logger.info("🎯 Trying TikTok Mobile API (Backup Method)...")
             return download_tiktok_video(cleaned_url, uid, start_time)
         
-        # For other platforms, use existing yt-dlp method
+        # STRATEGY 3: For other platforms, use yt-dlp as backup
+        logger.info(f"🎯 Trying yt-dlp (Backup Method for {platform})...")
+        
         # Get platform-specific configuration
         ydl_opts = get_platform_config(platform)
         ydl_opts["outtmpl"] = os.path.join(DOWNLOAD_DIR, f"{uid}_%(title)s.%(ext)s")
         
         # Execute download
-        logger.info(f"⬇️ Starting download from {platform}...")
+        logger.info(f"⬇️ Starting backup download from {platform}...")
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(cleaned_url, download=True)
@@ -544,11 +759,11 @@ def download_video():
         if IS_RENDER:
             base_url = base_url.replace("http://", "https://")
         
-        logger.info(f"✅ Download complete: {filename} ({download_time:.2f}s)")
+        logger.info(f"✅ Backup download complete: {filename} ({download_time:.2f}s)")
         
         return jsonify({
             "status": "success",
-            "message": "Download successful",
+            "message": "Download successful via backup method",
             "platform": platform,
             "title": info.get("title", "Unknown"),
             "duration": info.get("duration", 0),
@@ -558,12 +773,14 @@ def download_video():
             "view_count": info.get("view_count", 0),
             "download_time": round(download_time, 2),
             "environment": "render" if IS_RENDER else "local",
-            "file_size_mb": round(os.path.getsize(os.path.join(DOWNLOAD_DIR, filename)) / (1024 * 1024), 2)
+            "file_size_mb": round(os.path.getsize(os.path.join(DOWNLOAD_DIR, filename)) / (1024 * 1024), 2),
+            "extractor": "yt-dlp",
+            "method": "backup"
         })
 
     except yt_dlp.utils.DownloadError as e:
         error_msg = str(e)
-        logger.error(f"❌ Download failed: {error_msg}")
+        logger.error(f"❌ Backup download failed: {error_msg}")
         
         # Check if it's a TikTok photo post (detected after redirect)
         if platform == "tiktok" and ("/photo/" in error_msg or "photo" in error_msg.lower()):
@@ -601,7 +818,7 @@ def download_video():
             }), 400
         else:
             return jsonify({
-                "error": f"Download failed: {error_msg}",
+                "error": f"All download methods failed: {error_msg}",
                 "platform": platform
             }), 500
     
@@ -734,11 +951,13 @@ def get_port():
 
 if __name__ == "__main__":
     port = get_port()
-    logger.info(f"🚀 Starting OneTap Social Media Downloader")
+    logger.info(f"🚀 Starting OneTap Social Media Downloader v2.2.0")
     logger.info(f"📁 Download directory: {DOWNLOAD_DIR}")
     logger.info(f"🍪 Cookies file: {SOCIAL_COOKIES_FILE}")
     logger.info(f"🌍 Environment: {'Render' if IS_RENDER else 'Local'}")
-    logger.info(f"✅ Supported platforms: TikTok, Facebook, Instagram, Twitter")
+    logger.info(f"⚡ Primary Method: J2Download API (100+ sites)")
+    logger.info(f"🔄 Backup Methods: TikTok Mobile API + yt-dlp")
+    logger.info(f"✅ Supported platforms: TikTok, Facebook, Instagram, Twitter, YouTube + 100+ others")
     
     # If port is 0, Flask will pick an available port
     app.run(host="0.0.0.0", port=port if port != 0 else None, debug=False)
