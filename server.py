@@ -880,11 +880,17 @@ def download_video():
         
         if j2_success:
             try:
-                # Create safe filename
+                # Create safe filename with length limit
                 title = j2_result.get("title", "Video")
                 safe_title = "".join(c for c in title if c.isalnum() or c in (' ', '-', '_')).strip()
                 if not safe_title:
                     safe_title = "Video"
+                
+                # Truncate title to prevent "File name too long" errors
+                # Max filename length on most systems is 255 chars, leave room for uid and extension
+                max_title_length = 200
+                if len(safe_title) > max_title_length:
+                    safe_title = safe_title[:max_title_length].strip()
                 
                 extension = j2_result.get("extension", "mp4")
                 filename = f"{uid}_{safe_title}.{extension}"
