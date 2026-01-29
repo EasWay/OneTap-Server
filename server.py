@@ -136,7 +136,8 @@ class J2Extractor:
                 "Accept": "application/json, text/plain, */*",
                 "Sec-Fetch-Dest": "empty",
                 "Sec-Fetch-Mode": "cors",
-                "Sec-Fetch-Site": "same-origin"
+                "Sec-Fetch-Site": "same-origin",
+                "X-Requested-With": "XMLHttpRequest"  # Crucial for AJAX endpoints
             }
             session.headers.update(api_headers)
             
@@ -147,14 +148,29 @@ class J2Extractor:
             response = session.post(self.api_url, json=payload, timeout=30)
             
             if response.status_code != 200:
-                logger.error(f"❌ J2Download API Error: {response.status_code} - {response.text[:200]}")
+                logger.error(f"❌ J2Download API Error: {response.status_code}")
+                try:
+                    error_data = response.json()
+                    logger.error(f"❌ Error response: {error_data}")
+                except:
+                    logger.error(f"❌ Raw error response: {response.text[:500]}")
                 return {"success": False, "error": f"API error: {response.status_code}"}
             
             data = response.json()
             medias = data.get("medias", [])
             
+            # Debugging: Log response if medias is empty
             if not medias:
-                return {"success": False, "error": "No media found in response"}
+                logger.warning(f"⚠️ Empty media response. Full API response: {data}")
+                # Sometimes APIs return error messages in different keys
+                if "message" in data:
+                    return {"success": False, "error": f"J2 API Error: {data['message']}"}
+                elif "error" in data:
+                    return {"success": False, "error": f"J2 API Error: {data['error']}"}
+                else:
+                    return {"success": False, "error": "No media found in response"}
+            
+            logger.info(f"✅ Found {len(medias)} media items from J2Download")
             
             # Find best video format
             best_video = None
