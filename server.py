@@ -148,8 +148,12 @@ class J2Extractor:
             # Make API call
             payload = {"url": url}
             logger.info(f"🚀 Sending payload to {self.api_url}")
+            logger.info(f"📤 Payload: {payload}")
             
             response = session.post(self.api_url, json=payload, timeout=30)
+            
+            logger.info(f"📥 Response status: {response.status_code}")
+            logger.info(f"📥 Response headers: {dict(response.headers)}")
             
             if response.status_code != 200:
                 logger.error(f"❌ J2Download API Error: {response.status_code}")
@@ -160,7 +164,13 @@ class J2Extractor:
                     logger.error(f"❌ Raw error response: {response.text[:500]}")
                 return {"success": False, "error": f"API error: {response.status_code}"}
             
-            data = response.json()
+            try:
+                data = response.json()
+                logger.info(f"📥 Full response data: {data}")
+            except Exception as e:
+                logger.error(f"❌ Failed to parse JSON response: {e}")
+                logger.error(f"❌ Raw response: {response.text[:1000]}")
+                return {"success": False, "error": "Invalid JSON response"}
             
             # Check for API-level errors first
             if data.get("error") is True:
@@ -660,6 +670,29 @@ def get_platform_config(platform):
     return config
 
 
+@app.route("/test_j2", methods=["POST"])
+def test_j2download():
+    """Test J2Download with different URL formats"""
+    try:
+        data = request.get_json()
+        test_url = data.get("url", "https://www.tiktok.com/@mackasy_ai/video/7600355794755849490")
+        
+        logger.info(f"🧪 Testing J2Download with URL: {test_url}")
+        
+        j2_extractor = J2Extractor()
+        result = j2_extractor.extract_video_info(test_url)
+        
+        return jsonify({
+            "test_url": test_url,
+            "result": result,
+            "timestamp": time.time()
+        })
+        
+    except Exception as e:
+        logger.error(f"❌ J2Download test failed: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/", methods=["GET"])
 def index():
     """Health check and API info"""
@@ -787,15 +820,37 @@ def download_video():
         logger.info("🎯 Trying J2Extractor (Primary Method)...")
         j2_extractor = J2Extractor()
         
-        # For J2Download, use the expanded URL with ALL parameters intact
-        j2_url = url
+        # For J2Download, try multiple URL formats to find what works
+        urls_to_try_j2 = []
+        
+        # 1. Original URL
+        urls_to_try_j2.append(url)
+        
+        # 2. Expanded URL with parameters (if it's a short URL)
         if any(domain in url for domain in ['vt.tiktok.com', 'vm.tiktok.com']):
-            j2_url = expand_short_url(url)
-            logger.info(f"🔗 Using expanded URL for J2Download: {j2_url}")
+            expanded_url = expand_short_url(url)
+            if expanded_url != url:
+                urls_to_try_j2.append(expanded_url)
+                logger.info(f"🔗 Expanded URL: {expanded_url}")
+                
+                # 3. Expanded URL without parameters
+                clean_expanded = expanded_url.split('?')[0]
+                if clean_expanded != expanded_url:
+                    urls_to_try_j2.append(clean_expanded)
+                    logger.info(f"🧹 Clean expanded URL: {clean_expanded}")
         
-        j2_result = j2_extractor.extract_video_info(j2_url)
+        # Try each URL format with J2Download
+        j2_success = False
+        for i, test_url in enumerate(urls_to_try_j2):
+            logger.info(f"🔄 J2Download attempt {i+1}/{len(urls_to_try_j2)}: {test_url}")
+            j2_result = j2_extractor.extract_video_info(test_url)
+            if j2_result["success"]:
+                j2_success = True
+                break
+            else:
+                logger.warning(f"⚠️ J2Download attempt {i+1} failed: {j2_result.get('error', 'Unknown error')}")
         
-        if j2_result["success"]:
+        if j2_success:
             try:
                 # Create safe filename
                 title = j2_result.get("title", "Video")
@@ -839,7 +894,7 @@ def download_video():
             except Exception as e:
                 logger.warning(f"⚠️ J2Extractor processing failed: {e}, trying backup methods...")
         else:
-            logger.warning(f"⚠️ J2Extractor failed: {j2_result.get('error', 'Unknown error')}, trying backup methods...")
+            logger.warning(f"⚠️ J2Extractor failed after trying {len(urls_to_try_j2)} URL formats, trying backup methods...")
 
         # STRATEGY 2: Special handling for TikTok using mobile API emulation (Backup for TikTok)
         if platform == "tiktok":
