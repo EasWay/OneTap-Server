@@ -820,26 +820,27 @@ def download_video():
         logger.info("🎯 Trying J2Extractor (Primary Method)...")
         j2_extractor = J2Extractor()
         
-        # For J2Download, try multiple URL formats to find what works
+        # For J2Download, only use expanded full URLs - never short URLs
         urls_to_try_j2 = []
         
-        # 1. Original URL
-        urls_to_try_j2.append(url)
-        
-        # 2. Expanded URL with parameters (if it's a short URL)
+        # If it's a short URL, expand it first
         if any(domain in url for domain in ['vt.tiktok.com', 'vm.tiktok.com']):
             expanded_url = expand_short_url(url)
-            if expanded_url != url:
-                urls_to_try_j2.append(expanded_url)
-                logger.info(f"🔗 Expanded URL: {expanded_url}")
-                
-                # 3. Expanded URL without parameters
-                clean_expanded = expanded_url.split('?')[0]
-                if clean_expanded != expanded_url:
-                    urls_to_try_j2.append(clean_expanded)
-                    logger.info(f"🧹 Clean expanded URL: {clean_expanded}")
+            logger.info(f"🔗 Expanded URL: {expanded_url}")
+            
+            # 1. Expanded URL with parameters
+            urls_to_try_j2.append(expanded_url)
+            
+            # 2. Expanded URL without parameters
+            clean_expanded = expanded_url.split('?')[0]
+            if clean_expanded != expanded_url:
+                urls_to_try_j2.append(clean_expanded)
+                logger.info(f"🧹 Clean expanded URL: {clean_expanded}")
+        else:
+            # If it's already a full URL, use it as-is
+            urls_to_try_j2.append(url)
         
-        # Try each URL format with J2Download
+        # Try each FULL URL format with J2Download (no short URLs)
         j2_success = False
         for i, test_url in enumerate(urls_to_try_j2):
             logger.info(f"🔄 J2Download attempt {i+1}/{len(urls_to_try_j2)}: {test_url}")
@@ -849,6 +850,10 @@ def download_video():
                 break
             else:
                 logger.warning(f"⚠️ J2Download attempt {i+1} failed: {j2_result.get('error', 'Unknown error')}")
+                # If it's the "Invalid link" error, J2Download might not support TikTok right now
+                if "Invalid link" in j2_result.get('error', ''):
+                    logger.warning("⚠️ J2Download appears to be rejecting TikTok URLs - skipping remaining attempts")
+                    break
         
         if j2_success:
             try:
