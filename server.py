@@ -347,39 +347,85 @@ class J2Extractor:
             logger.info(f"🎯 J2 Extraction for {platform}: {video_url}")
             
             session = requests.Session()
-            session.headers.update({
-                "User-Agent": J2_UA,
-                "Accept": "application/json, text/plain, */*",
-                "Sec-Fetch-Mode": "cors",
-                "Origin": J2_BASE_URL,
-                "Referer": f"{J2_BASE_URL}/"
-            })
             
-            # Handshake
+            # Step 1: Navigation headers (simulate typing URL in browser)
+            nav_headers = {
+                "User-Agent": J2_UA,
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.9",
+                "Sec-Ch-Ua": '"Not(A:Brand";v="8", "Chromium";v="144", "Google Chrome";v="144"',
+                "Sec-Ch-Ua-Mobile": "?0",
+                "Sec-Ch-Ua-Platform": '"Windows"',
+                "Sec-Fetch-Dest": "document",
+                "Sec-Fetch-Mode": "navigate",
+                "Sec-Fetch-Site": "none",
+                "Sec-Fetch-User": "?1",
+                "Upgrade-Insecure-Requests": "1"
+            }
+            
+            session.headers.update(nav_headers)
+            
+            # Handshake with navigation headers
             logger.info("🤝 Performing J2Download handshake...")
-            home_resp = session.get(J2_BASE_URL, timeout=10)
+            home_resp = session.get(J2_BASE_URL, timeout=15)
+            
+            if home_resp.status_code != 200:
+                logger.warning(f"⚠️ Handshake returned status {home_resp.status_code}")
+                return None
+            
+            # Deep Token Extraction - Priority 1: Cookies
             csrf_token = session.cookies.get("csrf_token")
             
+            # Priority 2: HTML Meta Tags
             if not csrf_token:
-                meta = re.search(r'<meta\s+name="csrf-token"\s+content="([^"]+)"', home_resp.text)
-                if meta: csrf_token = meta.group(1)
+                logger.info("🔍 Searching HTML for CSRF token...")
+                meta_match = re.search(r'<meta\s+name="csrf-token"\s+content="([^"]+)"', home_resp.text)
+                if meta_match:
+                    csrf_token = meta_match.group(1)
+                    logger.info("✅ Found CSRF token in Meta Tag")
             
+            # Priority 3: JavaScript Variables
             if not csrf_token:
                 js_match = re.search(r'csrf_token\s*=\s*["\']([^"\']+)["\']', home_resp.text)
-                if js_match: csrf_token = js_match.group(1)
+                if js_match:
+                    csrf_token = js_match.group(1)
+                    logger.info("✅ Found CSRF token in JS")
+            
+            # Priority 4: Laravel Token Pattern
+            if not csrf_token:
+                laravel_match = re.search(r'_token["\']?\s*:\s*["\']([^"\']+)["\']', home_resp.text)
+                if laravel_match:
+                    csrf_token = laravel_match.group(1)
+                    logger.info("✅ Found Laravel token")
+            
+            # Priority 5: XSRF Token (alternative name)
+            if not csrf_token:
+                xsrf_match = re.search(r'xsrf[_-]?token["\']?\s*[:=]\s*["\']([^"\']+)["\']', home_resp.text, re.IGNORECASE)
+                if xsrf_match:
+                    csrf_token = xsrf_match.group(1)
+                    logger.info("✅ Found XSRF token")
             
             if not csrf_token: 
-                logger.warning("⚠️ No CSRF token found")
+                logger.warning("⚠️ No CSRF token found after deep search")
                 return None
             
             logger.info(f"✅ CSRF token acquired: {csrf_token[:10]}...")
             
-            # API Call
-            session.headers.update({
+            # Step 2: Switch to XHR headers for API call
+            xhr_headers = {
+                "Referer": f"{J2_BASE_URL}/",
+                "Origin": J2_BASE_URL,
                 "Content-Type": "application/json",
+                "Accept": "application/json, text/plain, */*",
+                "Sec-Fetch-Dest": "empty",
+                "Sec-Fetch-Mode": "cors",
+                "Sec-Fetch-Site": "same-origin",
                 "x-csrf-token": csrf_token,
                 "X-Requested-With": "XMLHttpRequest"
-            })
+            }
+            
+            # Update session with XHR headers
+            session.headers.update(xhr_headers)
             
             payload = {
                 "data": {
@@ -391,7 +437,7 @@ class J2Extractor:
             logger.info(f"🚀 Sending J2Download API request...")
             logger.info(f"📤 Payload: {payload}")
             
-            response = session.post(J2_API_URL, json=payload, timeout=25)
+            response = session.post(J2_API_URL, json=payload, timeout=30)
             
             logger.info(f"📥 Response status: {response.status_code}")
             
