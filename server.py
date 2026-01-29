@@ -356,6 +356,7 @@ class J2Extractor:
             })
             
             # Handshake
+            logger.info("🤝 Performing J2Download handshake...")
             home_resp = session.get(J2_BASE_URL, timeout=10)
             csrf_token = session.cookies.get("csrf_token")
             
@@ -367,7 +368,11 @@ class J2Extractor:
                 js_match = re.search(r'csrf_token\s*=\s*["\']([^"\']+)["\']', home_resp.text)
                 if js_match: csrf_token = js_match.group(1)
             
-            if not csrf_token: return None
+            if not csrf_token: 
+                logger.warning("⚠️ No CSRF token found")
+                return None
+            
+            logger.info(f"✅ CSRF token acquired: {csrf_token[:10]}...")
             
             # API Call
             session.headers.update({
@@ -383,21 +388,46 @@ class J2Extractor:
                 }
             }
             
-            response = session.post(J2_API_URL, json=payload, timeout=25)
-            data = response.json()
+            logger.info(f"🚀 Sending J2Download API request...")
+            logger.info(f"📤 Payload: {payload}")
             
-            if "error" in data and data["error"]: return None
+            response = session.post(J2_API_URL, json=payload, timeout=25)
+            
+            logger.info(f"📥 Response status: {response.status_code}")
+            
+            if response.status_code != 200:
+                logger.error(f"❌ J2Download API HTTP error: {response.status_code}")
+                try:
+                    error_data = response.json()
+                    logger.error(f"❌ Error response: {error_data}")
+                except:
+                    logger.error(f"❌ Raw error response: {response.text[:500]}")
+                return None
+            
+            try:
+                data = response.json()
+                logger.info(f"📥 J2Download response: {data}")
+            except Exception as e:
+                logger.error(f"❌ Failed to parse JSON: {e}")
+                logger.error(f"❌ Raw response: {response.text[:1000]}")
+                return None
+            
+            if "error" in data and data["error"]: 
+                logger.warning(f"⚠️ J2Download API error: {data.get('message', 'Unknown error')}")
+                return None
             
             # Use Smart Parser
             best_media = J2ResponseParser.parse(data, platform)
             if best_media:
+                logger.info(f"✅ J2Download extraction successful!")
                 return {
                     "url": best_media.get("url"),
                     "ext": best_media.get("extension", "mp4"),
                     "title": data.get("title", "video")
                 }
-            
-            return None
+            else:
+                logger.warning("⚠️ J2Download: No suitable media found in response")
+                return None
             
         except Exception as e:
             logger.error(f"❌ J2 Failed: {e}")
