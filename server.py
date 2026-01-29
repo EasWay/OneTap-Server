@@ -141,60 +141,89 @@ class J2Extractor:
             }
             session.headers.update(api_headers)
             
-            # Make API call
-            payload = {"url": url}
-            logger.info(f"🚀 Sending payload to {self.api_url}")
+            # Try original URL first
+            urls_to_try = [url]
             
-            response = session.post(self.api_url, json=payload, timeout=30)
-            
-            if response.status_code != 200:
-                logger.error(f"❌ J2Download API Error: {response.status_code}")
+            # If it's a short URL, also try the expanded version
+            if any(domain in url for domain in ['vt.tiktok.com', 'vm.tiktok.com', 't.co', 'bit.ly', 'tinyurl.com']):
                 try:
-                    error_data = response.json()
-                    logger.error(f"❌ Error response: {error_data}")
+                    expanded_url = expand_short_url(url)
+                    if expanded_url != url:
+                        urls_to_try.append(expanded_url)
                 except:
-                    logger.error(f"❌ Raw error response: {response.text[:500]}")
-                return {"success": False, "error": f"API error: {response.status_code}"}
+                    pass
             
-            data = response.json()
-            medias = data.get("medias", [])
+            last_error = None
             
-            # Debugging: Log response if medias is empty
-            if not medias:
-                logger.warning(f"⚠️ Empty media response. Full API response: {data}")
-                # Sometimes APIs return error messages in different keys
-                if "message" in data:
-                    return {"success": False, "error": f"J2 API Error: {data['message']}"}
-                elif "error" in data:
-                    return {"success": False, "error": f"J2 API Error: {data['error']}"}
-                else:
-                    return {"success": False, "error": "No media found in response"}
+            for attempt_url in urls_to_try:
+                try:
+                    # Make API call
+                    payload = {"url": attempt_url}
+                    logger.info(f"🚀 Sending payload to {self.api_url} with URL: {attempt_url}")
+                    
+                    response = session.post(self.api_url, json=payload, timeout=30)
+                    
+                    if response.status_code != 200:
+                        logger.error(f"❌ J2Download API Error: {response.status_code}")
+                        try:
+                            error_data = response.json()
+                            logger.error(f"❌ Error response: {error_data}")
+                        except:
+                            logger.error(f"❌ Raw error response: {response.text[:500]}")
+                        last_error = f"API error: {response.status_code}"
+                        continue
+                    
+                    data = response.json()
+                    
+                    # Check for API-level errors
+                    if data.get("error") is True or "error" in data:
+                        error_msg = data.get("message", data.get("error", "Unknown API error"))
+                        logger.warning(f"⚠️ J2Download API returned error: {error_msg}")
+                        last_error = f"J2 API Error: {error_msg}"
+                        continue
+                    
+                    medias = data.get("medias", [])
+                    
+                    # Debugging: Log response if medias is empty
+                    if not medias:
+                        logger.warning(f"⚠️ Empty media response for URL: {attempt_url}")
+                        logger.warning(f"⚠️ Full API response: {data}")
+                        last_error = "No media found in response"
+                        continue
+                    
+                    logger.info(f"✅ Found {len(medias)} media items from J2Download")
+                    
+                    # Find best video format
+                    best_video = None
+                    for media in medias:
+                        # Prioritize video type with audio
+                        if media.get("type") == "video" and (media.get("is_audio") or media.get("audioQuality")):
+                            best_video = media
+                            break
+                    
+                    # Fallback to first available
+                    if not best_video:
+                        best_video = medias[0]
+                    
+                    return {
+                        "success": True,
+                        "video_url": best_video.get("url"),
+                        "title": data.get("title", "Video"),
+                        "extension": best_video.get("extension", "mp4"),
+                        "thumbnail": data.get("thumbnail"),
+                        "quality": best_video.get("quality", "unknown"),
+                        "has_audio": best_video.get("is_audio", True),
+                        "file_size": best_video.get("size"),
+                        "extractor": "j2download"
+                    }
+                    
+                except Exception as e:
+                    logger.warning(f"⚠️ Attempt with URL {attempt_url} failed: {e}")
+                    last_error = str(e)
+                    continue
             
-            logger.info(f"✅ Found {len(medias)} media items from J2Download")
-            
-            # Find best video format
-            best_video = None
-            for media in medias:
-                # Prioritize video type with audio
-                if media.get("type") == "video" and (media.get("is_audio") or media.get("audioQuality")):
-                    best_video = media
-                    break
-            
-            # Fallback to first available
-            if not best_video:
-                best_video = medias[0]
-            
-            return {
-                "success": True,
-                "video_url": best_video.get("url"),
-                "title": data.get("title", "Video"),
-                "extension": best_video.get("extension", "mp4"),
-                "thumbnail": data.get("thumbnail"),
-                "quality": best_video.get("quality", "unknown"),
-                "has_audio": best_video.get("is_audio", True),
-                "file_size": best_video.get("size"),
-                "extractor": "j2download"
-            }
+            # If we get here, all attempts failed
+            return {"success": False, "error": last_error or "All URL attempts failed"}
             
         except requests.exceptions.Timeout:
             logger.error("❌ J2Download API timeout")
@@ -291,6 +320,34 @@ PLATFORM_PATTERNS = {
 }
 
 
+def expand_short_url(url, max_redirects=5):
+    """Expand shortened URLs to their final destination"""
+    try:
+        logger.info(f"🔗 Expanding short URL: {url}")
+        
+        # Use HEAD request to follow redirects without downloading content
+        response = requests.head(
+            url, 
+            allow_redirects=True, 
+            timeout=10,
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36"
+            }
+        )
+        
+        final_url = response.url
+        if final_url != url:
+            logger.info(f"✅ URL expanded: {final_url}")
+            return final_url
+        else:
+            logger.info("ℹ️ URL was not shortened")
+            return url
+            
+    except Exception as e:
+        logger.warning(f"⚠️ URL expansion failed: {e}, using original URL")
+        return url
+
+
 def clean_url(url, platform):
     """Clean and normalize URLs for better extraction"""
     try:
@@ -298,8 +355,11 @@ def clean_url(url, platform):
         url = re.sub(r'[?&](utm_[^&]*|fbclid|igshid|igsh|rdid|share_url|_r|_t)[^&]*', '', url)
         
         if platform == "tiktok":
-            # For TikTok, just remove query params and let yt-dlp handle all URL formats
-            # yt-dlp is smart enough to handle various TikTok URL formats
+            # Expand TikTok short URLs (vt.tiktok.com, vm.tiktok.com) to full URLs
+            if any(domain in url for domain in ['vt.tiktok.com', 'vm.tiktok.com']):
+                url = expand_short_url(url)
+            
+            # Remove query params after expansion
             cleaned = url.split('?')[0]
             logger.info(f"🧹 TikTok URL cleaned: {cleaned}")
             return cleaned
