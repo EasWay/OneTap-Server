@@ -145,8 +145,14 @@ class J2Extractor:
             # Don't clean or modify the URL - use it exactly as provided after expansion
             logger.info(f"🚀 Using full URL for J2Download: {url}")
             
-            # Make API call
-            payload = {"url": url}
+            # Make API call with correct payload structure
+            # J2Download expects: {"data": {"url": "...", "unlock": true}}
+            payload = {
+                "data": {
+                    "url": url,
+                    "unlock": True
+                }
+            }
             logger.info(f"🚀 Sending payload to {self.api_url}")
             logger.info(f"📤 Payload: {payload}")
             
@@ -323,6 +329,23 @@ def expand_short_url(url, max_redirects=5):
         )
         
         final_url = response.url
+        
+        # For TikTok URLs, add important query parameters if missing
+        if 'tiktok.com' in final_url and '/video/' in final_url:
+            from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
+            parsed = urlparse(final_url)
+            query_params = parse_qs(parsed.query)
+            
+            # Add TikTok-specific parameters that J2Download might need
+            if 'is_from_webapp' not in query_params:
+                query_params['is_from_webapp'] = ['1']
+            if 'sender_device' not in query_params:
+                query_params['sender_device'] = ['pc']
+            
+            # Rebuild URL with enhanced parameters
+            new_query = urlencode(query_params, doseq=True)
+            final_url = urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, new_query, parsed.fragment))
+        
         if final_url != url:
             logger.info(f"✅ URL expanded: {final_url}")
             return final_url
