@@ -466,11 +466,27 @@ class J2Extractor:
             best_media = J2ResponseParser.parse(data, platform)
             if best_media:
                 logger.info(f"✅ J2Download extraction successful!")
-                return {
-                    "url": best_media.get("url"),
-                    "ext": best_media.get("extension", "mp4"),
-                    "title": data.get("title", "video")
-                }
+                
+                # Check if it's a multi-media response (like TikTok photo slideshow)
+                medias = data.get("medias", [])
+                images = [m for m in medias if m.get("type") == "image"]
+                
+                if len(images) > 1:
+                    # Return full data for multi-image posts
+                    return {
+                        "url": best_media.get("url"),
+                        "ext": best_media.get("extension", "jpg"),
+                        "title": data.get("title", "video"),
+                        "medias": medias,  # Include all media items
+                        "type": "multi_image"
+                    }
+                else:
+                    # Single media item
+                    return {
+                        "url": best_media.get("url"),
+                        "ext": best_media.get("extension", "mp4"),
+                        "title": data.get("title", "video")
+                    }
             else:
                 logger.warning("⚠️ J2Download: No suitable media found in response")
                 return None
@@ -591,14 +607,71 @@ def download_video():
         
         if j2_result:
             logger.info("✅ J2 Success. Downloading...")
-            ext = j2_result.get("ext", "mp4")
-            filename = f"{uid}.{ext}"
-            filepath = os.path.join(DOWNLOAD_DIR, filename)
             
-            if download_to_server(j2_result["url"], filepath):
-                final_filename = filename
+            # Check if it's a multi-image post (like TikTok photo slideshow)
+            if isinstance(j2_result, dict) and "medias" in j2_result:
+                medias = j2_result["medias"]
+                images = [m for m in medias if m.get("type") == "image"]
+                
+                if len(images) > 1:
+                    logger.info(f"📸 Multi-image post detected: {len(images)} images")
+                    
+                    # Download all images
+                    downloaded_files = []
+                    for i, image in enumerate(images):
+                        ext = image.get("extension", "jpg")
+                        filename = f"{uid}_image_{i+1}.{ext}"
+                        filepath = os.path.join(DOWNLOAD_DIR, filename)
+                        
+                        if download_to_server(image["url"], filepath):
+                            downloaded_files.append(filename)
+                            logger.info(f"✅ Downloaded image {i+1}/{len(images)}: {filename}")
+                        else:
+                            logger.warning(f"⚠️ Failed to download image {i+1}")
+                    
+                    if downloaded_files:
+                        # Return info about all downloaded files
+                        base_url = request.host_url.rstrip("/").replace("http://", "https://")
+                        
+                        return jsonify({
+                            "status": "success",
+                            "message": f"Downloaded {len(downloaded_files)} images from photo slideshow",
+                            "type": "multi_image",
+                            "total_images": len(downloaded_files),
+                            "files": [
+                                {
+                                    "filename": filename,
+                                    "download_url": f"{base_url}/files/{filename}",
+                                    "type": "image"
+                                } for filename in downloaded_files
+                            ],
+                            "title": j2_result.get("title", "TikTok Photo Post"),
+                            "platform": platform
+                        })
+                    else:
+                        logger.warning("⚠️ J2 extraction successful but all image downloads failed. Falling back...")
+                else:
+                    # Single image - use original logic
+                    ext = j2_result.get("ext", "jpg")
+                    filename = f"{uid}.{ext}"
+                    filepath = os.path.join(DOWNLOAD_DIR, filename)
+                    
+                    if download_to_server(j2_result["url"], filepath):
+                        final_filename = filename
+                    else:
+                        logger.warning("⚠️ J2 link valid, but download failed. Falling back...")
             else:
-                logger.warning("⚠️ J2 link valid, but download failed. Falling back...")
+                # Single media item - use original logic
+                ext = j2_result.get("ext", "mp4")
+                filename = f"{uid}.{ext}"
+                filepath = os.path.join(DOWNLOAD_DIR, filename)
+                
+                if download_to_server(j2_result["url"], filepath):
+                    final_filename = filename
+                else:
+                    logger.warning("⚠️ J2 link valid, but download failed. Falling back...")
+        else:
+            logger.warning("⚠️ J2Extractor failed, trying backup methods...")
         
         # --- STRATEGY 2: LOCAL BACKUP ---
         if not final_filename:
