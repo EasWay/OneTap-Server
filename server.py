@@ -558,17 +558,17 @@ async def download_to_server(url: str, filename: str) -> bool:
             "Sec-Fetch-Site": "cross-site"
         }
         
-        # Single GET request with redirect following
+        # Single GET request with redirect following - NO HEAD REQUESTS
         async with httpx.AsyncClient(
-            timeout=httpx.Timeout(120.0, connect=15.0),  # Longer timeout for large files
+            timeout=httpx.Timeout(120.0, connect=15.0),
             follow_redirects=True,
-            max_redirects=25,  # YouTube can have many redirects
+            max_redirects=25,
             limits=httpx.Limits(max_keepalive_connections=5, max_connections=10)
         ) as client:
             
             logger.info(f"🚀 Starting single GET request (no HEAD probing)")
             
-            # Single clean GET request - let httpx handle all redirects
+            # Direct GET request - let httpx handle all redirects silently
             async with client.stream('GET', url, headers=headers) as response:
                 
                 # Handle partial content (206) or success (200)
@@ -576,28 +576,18 @@ async def download_to_server(url: str, filename: str) -> bool:
                     logger.error(f"❌ HTTP {response.status_code}: {response.reason_phrase}")
                     return False
                 
-                # Log final URL after redirects
-                final_url = str(response.url)
-                logger.info(f"🔗 Final URL after redirects: {final_url}")
-                
-                # Check content type
-                content_type = response.headers.get('content-type', '')
+                # Minimal logging to avoid detection
                 content_length = response.headers.get('content-length', '0')
-                logger.info(f"📥 Content-Type: {content_type}, Size: {content_length} bytes")
+                logger.info(f"� Conte nt-Type: {response.headers.get('content-type', '')}, Size: {content_length} bytes")
                 
                 # Stream download
                 total_size = int(content_length) if content_length.isdigit() else 0
                 downloaded = 0
                 
                 with open(filename, 'wb') as f:
-                    async for chunk in response.aiter_bytes(chunk_size=16384):  # Larger chunks
+                    async for chunk in response.aiter_bytes(chunk_size=16384):
                         f.write(chunk)
                         downloaded += len(chunk)
-                        
-                        # Log progress every 5MB for large files
-                        if total_size > 0 and downloaded % (5 * 1024 * 1024) == 0:
-                            progress = (downloaded / total_size) * 100
-                            logger.info(f"📥 Download progress: {progress:.1f}% ({downloaded:,} bytes)")
                 
                 logger.info(f"✅ Download completed: {downloaded:,} bytes")
                 return True
