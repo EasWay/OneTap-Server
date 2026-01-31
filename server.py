@@ -527,7 +527,7 @@ async def download_to_server_with_retry(url: str, filename: str, max_retries: in
     return await download_to_server(url, filename)
 
 async def download_to_server(url: str, filename: str) -> bool:
-    """Downloads file from URL - Full YouTube Android client emulation"""
+    """Downloads file from URL - YouTube single-node strategy to avoid multi-redirect 403"""
     try:
         # Exact YouTube Android app headers - full client emulation
         headers = {
@@ -542,38 +542,55 @@ async def download_to_server(url: str, filename: str) -> bool:
             "Sec-Fetch-Site": "cross-site"
         }
         
-        # Fresh client for each request - new TLS fingerprint
+        # Disable automatic redirects - handle manually to avoid multi-node 403
         async with httpx.AsyncClient(
             timeout=httpx.Timeout(120.0, connect=15.0),
-            follow_redirects=True,
-            max_redirects=25,
+            follow_redirects=False,  # KEY CHANGE: Manual redirect handling
             limits=httpx.Limits(max_keepalive_connections=5, max_connections=10)
         ) as client:
             
-            logger.info(f"🚀 YouTube Android client download")
+            logger.info(f"🚀 YouTube single-node download (no auto-redirects)")
             
-            # Single GET request - let httpx handle redirects
-            async with client.stream('GET', url, headers=headers) as response:
-                
-                # Handle partial content (206) or success (200)
-                if response.status_code not in [200, 206]:
-                    logger.error(f"❌ HTTP {response.status_code}: {response.reason_phrase}")
+            # First request - check for redirects
+            response = await client.get(url, headers=headers)
+            
+            # Handle redirects manually - max 3 hops to avoid poisoning
+            redirect_count = 0
+            max_redirects = 3
+            
+            while response.status_code in [301, 302, 303, 307, 308] and redirect_count < max_redirects:
+                redirect_url = response.headers.get('location')
+                if not redirect_url:
+                    logger.error("❌ Redirect without Location header")
                     return False
                 
-                # Minimal logging to avoid detection
-                content_length = response.headers.get('content-length', '0')
-                logger.info(f"� Conte nt-Type: {response.headers.get('content-type', '')}, Size: {content_length} bytes")
+                redirect_count += 1
+                logger.info(f"🔄 Manual redirect {redirect_count}/{max_redirects}: {redirect_url[:50]}...")
                 
-                # Stream download
-                downloaded = 0
-                
-                with open(filename, 'wb') as f:
-                    async for chunk in response.aiter_bytes(chunk_size=16384):
-                        f.write(chunk)
-                        downloaded += len(chunk)
-                
-                logger.info(f"✅ Downloaded: {downloaded:,} bytes")
-                return True
+                # Fresh client for each redirect to avoid fingerprint tracking
+                async with httpx.AsyncClient(
+                    timeout=httpx.Timeout(120.0, connect=15.0),
+                    follow_redirects=False,
+                    limits=httpx.Limits(max_keepalive_connections=5, max_connections=10)
+                ) as redirect_client:
+                    response = await redirect_client.get(redirect_url, headers=headers)
+            
+            # Check final response
+            if response.status_code not in [200, 206]:
+                logger.error(f"❌ HTTP {response.status_code}: {response.reason_phrase}")
+                return False
+            
+            # Stream download from final URL
+            logger.info(f"📦 Starting stream download")
+            
+            downloaded = 0
+            with open(filename, 'wb') as f:
+                async for chunk in response.aiter_bytes(chunk_size=16384):
+                    f.write(chunk)
+                    downloaded += len(chunk)
+            
+            logger.info(f"✅ Downloaded: {downloaded:,} bytes")
+            return True
                 
     except Exception as e:
         logger.error(f"❌ Download failed: {e}")
@@ -705,16 +722,15 @@ async def index() -> Dict[str, Any]:
 @post("/download")
 async def download_video(data: DownloadRequest) -> DownloadResponse:
     """
-    ASYNC High-Performance Download Endpoint
+    ASYNC High-Performance Download Endpoint with Stream Proxy
     - Uses Pydantic for automatic validation
     - HTTPX for non-blocking HTTP requests
-    - Handles thousands of concurrent requests
+    - Implements stream proxy to avoid 403 errors
     """
     logger.info("🚀 Async download request received")
     
     try:
         uid = str(uuid.uuid4())
-        final_filename = None
         
         # 1. Clean & Expand URL (ASYNC)
         url = await expand_short_url(data.url)
@@ -730,7 +746,7 @@ async def download_video(data: DownloadRequest) -> DownloadResponse:
         if not j2_result:
             raise HTTPException(status_code=400, detail="J2Download extraction failed")
         
-        logger.info("✅ J2 Success. Downloading...")
+        logger.info("✅ J2 Success. Setting up stream proxy...")
         
         # Check if it's a multi-image post (like TikTok photo slideshow)
         if isinstance(j2_result, dict) and "medias" in j2_result:
@@ -740,7 +756,7 @@ async def download_video(data: DownloadRequest) -> DownloadResponse:
             if len(images) > 1:
                 logger.info(f"📸 Multi-image post detected: {len(images)} images")
                 
-                # Download all images concurrently using asyncio.gather
+                # For multi-image, we still download to server since they're usually small
                 download_tasks = []
                 filenames = []
                 
@@ -766,7 +782,6 @@ async def download_video(data: DownloadRequest) -> DownloadResponse:
                         logger.warning(f"⚠️ Failed to download image {i+1}: {result}")
                 
                 if downloaded_files:
-                    # Return info about all downloaded files
                     return DownloadResponse(
                         status="success",
                         message=f"Downloaded {len(downloaded_files)} images from photo slideshow",
@@ -784,34 +799,31 @@ async def download_video(data: DownloadRequest) -> DownloadResponse:
                     )
                 else:
                     raise HTTPException(status_code=500, detail="All image downloads failed")
-            else:
-                # Single image - use original logic
-                ext = j2_result.get("ext", "jpg")
-                filename = f"{uid}.{ext}"
-                filepath = os.path.join(DOWNLOAD_DIR, filename)
-                
-                if await download_to_server_with_retry(j2_result["url"], filepath):
-                    final_filename = filename
-                else:
-                    raise HTTPException(status_code=500, detail="Download failed")
-        else:
-            # Single media item - use original logic
-            ext = j2_result.get("ext", "mp4")
-            filename = f"{uid}.{ext}"
-            filepath = os.path.join(DOWNLOAD_DIR, filename)
-            
-            if await download_to_server_with_retry(j2_result["url"], filepath):
-                final_filename = filename
-            else:
-                raise HTTPException(status_code=500, detail="Download failed")
         
-        if not final_filename:
-            raise HTTPException(status_code=500, detail="Download processing failed")
+        # For single video/audio files, use stream proxy approach
+        ext = j2_result.get("ext", "mp4")
+        
+        # Store the direct URL and metadata for streaming
+        stream_id = uid
+        stream_data = {
+            "url": j2_result["url"],
+            "ext": ext,
+            "title": j2_result.get("title", "video"),
+            "platform": platform
+        }
+        
+        # Store stream data in memory (in production, use Redis or database)
+        if not hasattr(app.state, 'streams'):
+            app.state.streams = {}
+        app.state.streams[stream_id] = stream_data
+        
+        logger.info(f"✅ Stream proxy ready for {stream_id}")
         
         return DownloadResponse(
             status="success",
-            download_url=f"/files/{final_filename}",
-            filename=final_filename
+            download_url=f"/stream/{stream_id}",
+            filename=f"{j2_result.get('title', 'video')}.{ext}",
+            message="Stream proxy ready"
         )
         
     except HTTPException:
@@ -828,9 +840,146 @@ async def serve_file(filename: str) -> File:
         raise HTTPException(status_code=404, detail="File not found")
     return File(file_path, filename=filename)
 
+@get("/stream/{stream_id:str}")
+async def stream_proxy(stream_id: str):
+    """
+    Stream Proxy Endpoint - The Cobalt Way
+    
+    This endpoint acts as a tunnel between the client and the video source.
+    The client never talks directly to YouTube/TikTok - only to this server.
+    This prevents 403 errors caused by signature validation failures.
+    """
+    from litestar.response import Stream
+    from litestar.types import Receive, Scope, Send
+    
+    # Get stream data
+    if not hasattr(app.state, 'streams') or stream_id not in app.state.streams:
+        raise HTTPException(status_code=404, detail="Stream not found")
+    
+    stream_data = app.state.streams[stream_id]
+    video_url = stream_data["url"]
+    ext = stream_data["ext"]
+    title = stream_data["title"]
+    platform = stream_data["platform"]
+    
+    logger.info(f"🌊 Starting stream proxy for {platform}: {stream_id}")
+    
+    async def stream_generator():
+        """Generator that streams video data chunk by chunk"""
+        try:
+            # Use appropriate headers based on platform
+            if platform == "youtube":
+                headers = {
+                    "User-Agent": "com.google.android.youtube/19.02.39 (Linux; U; Android 13; SM-G998B) gzip",
+                    "Accept": "*/*",
+                    "Referer": "https://www.youtube.com/",
+                    "Origin": "https://www.youtube.com",
+                    "Range": "bytes=0-",
+                    "Connection": "keep-alive",
+                    "Sec-Fetch-Dest": "video",
+                    "Sec-Fetch-Mode": "no-cors",
+                    "Sec-Fetch-Site": "cross-site"
+                }
+            else:
+                # Generic headers for other platforms
+                headers = {
+                    "User-Agent": EXACT_UA,
+                    "Accept": "*/*",
+                    "Referer": video_url.split('/')[0] + '//' + video_url.split('/')[2] + '/',
+                    "Connection": "keep-alive"
+                }
+            
+            # Create HTTP client with no redirects (handle manually for YouTube)
+            async with httpx.AsyncClient(
+                timeout=httpx.Timeout(120.0, connect=15.0),
+                follow_redirects=False if platform == "youtube" else True,
+                limits=httpx.Limits(max_keepalive_connections=5, max_connections=10)
+            ) as client:
+                
+                logger.info(f"🚀 Connecting to {platform} source...")
+                
+                # Handle YouTube redirects manually
+                if platform == "youtube":
+                    response = await client.get(video_url, headers=headers)
+                    
+                    # Handle redirects manually for YouTube
+                    redirect_count = 0
+                    max_redirects = 3
+                    
+                    while response.status_code in [301, 302, 303, 307, 308] and redirect_count < max_redirects:
+                        redirect_url = response.headers.get('location')
+                        if not redirect_url:
+                            logger.error("❌ Redirect without Location header")
+                            return
+                        
+                        redirect_count += 1
+                        logger.info(f"🔄 Manual redirect {redirect_count}/{max_redirects}")
+                        
+                        # Fresh request for redirect
+                        response = await client.get(redirect_url, headers=headers)
+                    
+                    if response.status_code not in [200, 206]:
+                        logger.error(f"❌ HTTP {response.status_code}: {response.reason_phrase}")
+                        return
+                else:
+                    # Direct request for other platforms
+                    response = await client.get(video_url, headers=headers)
+                    
+                    if response.status_code not in [200, 206]:
+                        logger.error(f"❌ HTTP {response.status_code}: {response.reason_phrase}")
+                        return
+                
+                logger.info(f"✅ Connected! Streaming {platform} content...")
+                
+                # Stream the content chunk by chunk
+                total_bytes = 0
+                async for chunk in response.aiter_bytes(chunk_size=16384):
+                    if chunk:
+                        total_bytes += len(chunk)
+                        yield chunk
+                
+                logger.info(f"✅ Stream complete: {total_bytes:,} bytes streamed")
+                
+                # Clean up stream data after successful completion
+                if hasattr(app.state, 'streams') and stream_id in app.state.streams:
+                    del app.state.streams[stream_id]
+                    
+        except Exception as e:
+            logger.error(f"❌ Stream error: {e}")
+            # Clean up on error
+            if hasattr(app.state, 'streams') and stream_id in app.state.streams:
+                del app.state.streams[stream_id]
+            return
+    
+    # Determine content type based on extension
+    content_type_map = {
+        "mp4": "video/mp4",
+        "mp3": "audio/mpeg",
+        "jpg": "image/jpeg",
+        "jpeg": "image/jpeg",
+        "png": "image/png",
+        "webm": "video/webm",
+        "m4a": "audio/mp4"
+    }
+    content_type = content_type_map.get(ext.lower(), "application/octet-stream")
+    
+    # Create safe filename
+    safe_title = re.sub(r'[^\w\s-]', '', title).strip()[:50]
+    filename = f"{safe_title}.{ext}" if safe_title else f"video.{ext}"
+    
+    return Stream(
+        iterator=stream_generator(),
+        media_type=content_type,
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Cache-Control": "no-cache",
+            "Accept-Ranges": "bytes"
+        }
+    )
+
 # Create Litestar app
 app = Litestar(
-    route_handlers=[index, get_version, download_video, serve_file]
+    route_handlers=[index, get_version, download_video, serve_file, stream_proxy]
 )
 
 if __name__ == "__main__":
