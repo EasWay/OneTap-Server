@@ -981,7 +981,7 @@ async def stream_proxy(stream_id: str) -> Stream:
         logger.info(f"🎬 Returning stream response: {filename} ({content_type})")
         
         return Stream(
-            iterator=stream_generator(),
+            stream_generator(),
             media_type=content_type,
             headers={
                 "Content-Disposition": f'attachment; filename="{filename}"',
