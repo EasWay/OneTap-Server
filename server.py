@@ -9,9 +9,9 @@ from urllib.parse import urlparse
 
 # Modern Async Stack
 from litestar import Litestar, get, post
-from litestar.response import File
+from litestar.response import File, Stream
 from litestar.exceptions import HTTPException
-from pydantic import BaseModel, validator
+from pydantic import BaseModel, field_validator
 import httpx
 
 # Configure logging
@@ -38,7 +38,8 @@ J2_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, li
 class DownloadRequest(BaseModel):
     url: str
     
-    @validator('url')
+    @field_validator('url')
+    @classmethod
     def validate_url(cls, v):
         if not v or not v.strip():
             raise ValueError('URL cannot be empty')
@@ -841,7 +842,7 @@ async def serve_file(filename: str) -> File:
     return File(file_path, filename=filename)
 
 @get("/stream/{stream_id:str}")
-async def stream_proxy(stream_id: str):
+async def stream_proxy(stream_id: str) -> Stream:
     """
     Stream Proxy Endpoint - The Cobalt Way
     
@@ -849,7 +850,6 @@ async def stream_proxy(stream_id: str):
     The client never talks directly to YouTube/TikTok - only to this server.
     This prevents 403 errors caused by signature validation failures.
     """
-    from litestar.response import Stream
     from litestar.types import Receive, Scope, Send
     
     # Get stream data
