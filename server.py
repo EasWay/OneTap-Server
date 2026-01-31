@@ -11,7 +11,6 @@ from urllib.parse import urlparse
 from litestar import Litestar, get, post
 from litestar.response import File, Stream
 from litestar.exceptions import HTTPException
-from pydantic import BaseModel, field_validator
 import httpx
 
 # Configure logging
@@ -819,6 +818,7 @@ async def download_video(data: DownloadRequest) -> DownloadResponse:
         app.state.streams[stream_id] = stream_data
         
         logger.info(f"✅ Stream proxy ready for {stream_id}")
+        logger.info(f"🔗 Stream URL will be: /stream/{stream_id}")
         
         return DownloadResponse(
             status="success",
@@ -852,130 +852,151 @@ async def stream_proxy(stream_id: str) -> Stream:
     """
     from litestar.types import Receive, Scope, Send
     
-    # Get stream data
-    if not hasattr(app.state, 'streams') or stream_id not in app.state.streams:
-        raise HTTPException(status_code=404, detail="Stream not found")
-    
-    stream_data = app.state.streams[stream_id]
-    video_url = stream_data["url"]
-    ext = stream_data["ext"]
-    title = stream_data["title"]
-    platform = stream_data["platform"]
-    
-    logger.info(f"🌊 Starting stream proxy for {platform}: {stream_id}")
-    
-    async def stream_generator():
-        """Generator that streams video data chunk by chunk"""
-        try:
-            # Use appropriate headers based on platform
-            if platform == "youtube":
-                headers = {
-                    "User-Agent": "com.google.android.youtube/19.02.39 (Linux; U; Android 13; SM-G998B) gzip",
-                    "Accept": "*/*",
-                    "Referer": "https://www.youtube.com/",
-                    "Origin": "https://www.youtube.com",
-                    "Range": "bytes=0-",
-                    "Connection": "keep-alive",
-                    "Sec-Fetch-Dest": "video",
-                    "Sec-Fetch-Mode": "no-cors",
-                    "Sec-Fetch-Site": "cross-site"
-                }
-            else:
-                # Generic headers for other platforms
-                headers = {
-                    "User-Agent": EXACT_UA,
-                    "Accept": "*/*",
-                    "Referer": video_url.split('/')[0] + '//' + video_url.split('/')[2] + '/',
-                    "Connection": "keep-alive"
-                }
+    try:
+        # Get stream data
+        if not hasattr(app.state, 'streams'):
+            logger.error(f"❌ App state has no streams attribute")
+            raise HTTPException(status_code=500, detail="Server state not initialized")
             
-            # Create HTTP client with no redirects (handle manually for YouTube)
-            async with httpx.AsyncClient(
-                timeout=httpx.Timeout(120.0, connect=15.0),
-                follow_redirects=False if platform == "youtube" else True,
-                limits=httpx.Limits(max_keepalive_connections=5, max_connections=10)
-            ) as client:
-                
-                logger.info(f"🚀 Connecting to {platform} source...")
-                
-                # Handle YouTube redirects manually
+        if stream_id not in app.state.streams:
+            logger.error(f"❌ Stream {stream_id} not found in {list(app.state.streams.keys())}")
+            raise HTTPException(status_code=404, detail="Stream not found")
+        
+        stream_data = app.state.streams[stream_id]
+        video_url = stream_data["url"]
+        ext = stream_data["ext"]
+        title = stream_data["title"]
+        platform = stream_data["platform"]
+        
+        logger.info(f"🌊 Starting stream proxy for {platform}: {stream_id}")
+        logger.info(f"📺 Video URL: {video_url[:100]}...")
+        
+        async def stream_generator():
+            """Generator that streams video data chunk by chunk"""
+            try:
+                # Use appropriate headers based on platform
                 if platform == "youtube":
-                    response = await client.get(video_url, headers=headers)
-                    
-                    # Handle redirects manually for YouTube
-                    redirect_count = 0
-                    max_redirects = 3
-                    
-                    while response.status_code in [301, 302, 303, 307, 308] and redirect_count < max_redirects:
-                        redirect_url = response.headers.get('location')
-                        if not redirect_url:
-                            logger.error("❌ Redirect without Location header")
-                            return
-                        
-                        redirect_count += 1
-                        logger.info(f"🔄 Manual redirect {redirect_count}/{max_redirects}")
-                        
-                        # Fresh request for redirect
-                        response = await client.get(redirect_url, headers=headers)
-                    
-                    if response.status_code not in [200, 206]:
-                        logger.error(f"❌ HTTP {response.status_code}: {response.reason_phrase}")
-                        return
+                    headers = {
+                        "User-Agent": "com.google.android.youtube/19.02.39 (Linux; U; Android 13; SM-G998B) gzip",
+                        "Accept": "*/*",
+                        "Referer": "https://www.youtube.com/",
+                        "Origin": "https://www.youtube.com",
+                        "Range": "bytes=0-",
+                        "Connection": "keep-alive",
+                        "Sec-Fetch-Dest": "video",
+                        "Sec-Fetch-Mode": "no-cors",
+                        "Sec-Fetch-Site": "cross-site"
+                    }
                 else:
-                    # Direct request for other platforms
-                    response = await client.get(video_url, headers=headers)
+                    # Generic headers for other platforms
+                    headers = {
+                        "User-Agent": EXACT_UA,
+                        "Accept": "*/*",
+                        "Referer": video_url.split('/')[0] + '//' + video_url.split('/')[2] + '/',
+                        "Connection": "keep-alive"
+                    }
+                
+                # Create HTTP client with no redirects (handle manually for YouTube)
+                async with httpx.AsyncClient(
+                    timeout=httpx.Timeout(120.0, connect=15.0),
+                    follow_redirects=False if platform == "youtube" else True,
+                    limits=httpx.Limits(max_keepalive_connections=5, max_connections=10)
+                ) as client:
                     
-                    if response.status_code not in [200, 206]:
-                        logger.error(f"❌ HTTP {response.status_code}: {response.reason_phrase}")
-                        return
-                
-                logger.info(f"✅ Connected! Streaming {platform} content...")
-                
-                # Stream the content chunk by chunk
-                total_bytes = 0
-                async for chunk in response.aiter_bytes(chunk_size=16384):
-                    if chunk:
-                        total_bytes += len(chunk)
-                        yield chunk
-                
-                logger.info(f"✅ Stream complete: {total_bytes:,} bytes streamed")
-                
-                # Clean up stream data after successful completion
+                    logger.info(f"🚀 Connecting to {platform} source...")
+                    
+                    # Handle YouTube redirects manually
+                    if platform == "youtube":
+                        response = await client.get(video_url, headers=headers)
+                        
+                        # Handle redirects manually for YouTube
+                        redirect_count = 0
+                        max_redirects = 3
+                        
+                        while response.status_code in [301, 302, 303, 307, 308] and redirect_count < max_redirects:
+                            redirect_url = response.headers.get('location')
+                            if not redirect_url:
+                                logger.error("❌ Redirect without Location header")
+                                return
+                            
+                            redirect_count += 1
+                            logger.info(f"🔄 Manual redirect {redirect_count}/{max_redirects}")
+                            
+                            # Fresh request for redirect
+                            response = await client.get(redirect_url, headers=headers)
+                        
+                        if response.status_code not in [200, 206]:
+                            logger.error(f"❌ HTTP {response.status_code}: {response.reason_phrase}")
+                            return
+                    else:
+                        # Direct request for other platforms
+                        response = await client.get(video_url, headers=headers)
+                        
+                        if response.status_code not in [200, 206]:
+                            logger.error(f"❌ HTTP {response.status_code}: {response.reason_phrase}")
+                            return
+                    
+                    logger.info(f"✅ Connected! Streaming {platform} content...")
+                    
+                    # Stream the content chunk by chunk
+                    total_bytes = 0
+                    async for chunk in response.aiter_bytes(chunk_size=16384):
+                        if chunk:
+                            total_bytes += len(chunk)
+                            yield chunk
+                    
+                    logger.info(f"✅ Stream complete: {total_bytes:,} bytes streamed")
+                    
+                    # Clean up stream data after successful completion
+                    if hasattr(app.state, 'streams') and stream_id in app.state.streams:
+                        del app.state.streams[stream_id]
+                        
+            except Exception as e:
+                logger.error(f"❌ Stream generator error: {e}")
+                logger.error(f"❌ Error type: {type(e).__name__}")
+                import traceback
+                logger.error(f"❌ Traceback: {traceback.format_exc()}")
+                # Clean up on error
                 if hasattr(app.state, 'streams') and stream_id in app.state.streams:
                     del app.state.streams[stream_id]
-                    
-        except Exception as e:
-            logger.error(f"❌ Stream error: {e}")
-            # Clean up on error
-            if hasattr(app.state, 'streams') and stream_id in app.state.streams:
-                del app.state.streams[stream_id]
-            return
-    
-    # Determine content type based on extension
-    content_type_map = {
-        "mp4": "video/mp4",
-        "mp3": "audio/mpeg",
-        "jpg": "image/jpeg",
-        "jpeg": "image/jpeg",
-        "png": "image/png",
-        "webm": "video/webm",
-        "m4a": "audio/mp4"
-    }
-    content_type = content_type_map.get(ext.lower(), "application/octet-stream")
-    
-    # Create safe filename
-    safe_title = re.sub(r'[^\w\s-]', '', title).strip()[:50]
-    filename = f"{safe_title}.{ext}" if safe_title else f"video.{ext}"
-    
-    return Stream(
-        iterator=stream_generator(),
-        media_type=content_type,
-        headers={
-            "Content-Disposition": f'attachment; filename="{filename}"',
-            "Cache-Control": "no-cache",
-            "Accept-Ranges": "bytes"
+                return
+        
+        # Determine content type based on extension
+        content_type_map = {
+            "mp4": "video/mp4",
+            "mp3": "audio/mpeg",
+            "jpg": "image/jpeg",
+            "jpeg": "image/jpeg",
+            "png": "image/png",
+            "webm": "video/webm",
+            "m4a": "audio/mp4"
         }
-    )
+        content_type = content_type_map.get(ext.lower(), "application/octet-stream")
+        
+        # Create safe filename
+        safe_title = re.sub(r'[^\w\s-]', '', title).strip()[:50]
+        filename = f"{safe_title}.{ext}" if safe_title else f"video.{ext}"
+        
+        logger.info(f"🎬 Returning stream response: {filename} ({content_type})")
+        
+        return Stream(
+            iterator=stream_generator(),
+            media_type=content_type,
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"',
+                "Cache-Control": "no-cache",
+                "Accept-Ranges": "bytes"
+            }
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Stream proxy error: {e}")
+        logger.error(f"❌ Error type: {type(e).__name__}")
+        import traceback
+        logger.error(f"❌ Traceback: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"Stream proxy error: {str(e)}")
 
 # Create Litestar app
 app = Litestar(
