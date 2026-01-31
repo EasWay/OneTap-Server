@@ -11,6 +11,7 @@ from urllib.parse import urlparse
 from litestar import Litestar, get, post
 from litestar.response import File, Stream
 from litestar.exceptions import HTTPException
+from pydantic import BaseModel, field_validator
 import httpx
 
 # Configure logging
