@@ -721,7 +721,8 @@ async def download_video(data: DownloadRequest) -> DownloadResponse:
         raise
     except Exception as e:
         logger.error(f"❌ Final Error: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))timizations
+        raise HTTPException(status_code=500, detail=str(e))
+
 @get("/files/{filename:str}")
 async def serve_file(filename: str) -> File:
     """Serve downloaded files"""
