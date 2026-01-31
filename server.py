@@ -373,6 +373,82 @@ class J2ResponseParser:
         
         return medias[0]
 
+class AsyncCobaltExtractor:
+    async def extract_download_url(self, video_url: str) -> Optional[Dict[str, Any]]:
+        """
+        Cobalt API Extractor - The True Proxy Solution
+        
+        Cobalt acts as a middleman that downloads the file and streams it to us,
+        avoiding IP mismatch issues with YouTube's signed URLs.
+        """
+        try:
+            platform = detect_platform(video_url)
+            logger.info(f"🔄 Cobalt extraction for {platform}: {video_url}")
+            
+            # Cobalt API endpoint
+            cobalt_api = "https://api.cobalt.tools/api/json"
+            
+            headers = {
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+                "User-Agent": "OneTap-Server/4.0.0"
+            }
+            
+            payload = {
+                "url": video_url,
+                "vCodec": "h264",
+                "vQuality": "720",
+                "aFormat": "mp3",
+                "isAudioOnly": False,
+                "isAudioMuted": False,
+                "dubLang": False,
+                "filenamePattern": "classic"
+            }
+            
+            logger.info(f"🚀 Asking Cobalt to proxy: {video_url}")
+            
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                try:
+                    resp = await client.post(cobalt_api, json=payload, headers=headers)
+                    
+                    if resp.status_code != 200:
+                        logger.error(f"❌ Cobalt API HTTP error: {resp.status_code}")
+                        return None
+                    
+                    data = resp.json()
+                    logger.info(f"📥 Cobalt response: {data}")
+                    
+                    if "status" in data and data["status"] == "error":
+                        logger.warning(f"⚠️ Cobalt API error: {data.get('text', 'Unknown error')}")
+                        return None
+                    
+                    if "url" not in data:
+                        logger.warning(f"⚠️ Cobalt response missing URL: {data}")
+                        return None
+                    
+                    tunnel_url = data["url"]
+                    logger.info(f"✅ Cobalt tunnel link acquired: {tunnel_url[:50]}...")
+                    
+                    # Extract filename from response or generate one
+                    filename = data.get("filename", "video")
+                    if not filename.endswith(('.mp4', '.mp3', '.webm')):
+                        filename += ".mp4"
+                    
+                    return {
+                        "url": tunnel_url,
+                        "ext": filename.split('.')[-1],
+                        "title": filename.rsplit('.', 1)[0],
+                        "source": "cobalt"
+                    }
+                    
+                except Exception as e:
+                    logger.error(f"❌ Cobalt request failed: {e}")
+                    return None
+                    
+        except Exception as e:
+            logger.error(f"❌ Cobalt extraction failed: {e}")
+            return None
+
 class AsyncJ2Extractor:
     async def extract_download_url(self, video_url: str) -> Optional[Dict[str, Any]]:
         try:
@@ -528,70 +604,90 @@ async def download_to_server_with_retry(url: str, filename: str, max_retries: in
     return await download_to_server(url, filename)
 
 async def download_to_server(url: str, filename: str) -> bool:
-    """Downloads file from URL - YouTube single-node strategy to avoid multi-redirect 403"""
+    """Downloads file from URL - Enhanced YouTube handling with better headers"""
     try:
-        # Exact YouTube Android app headers - full client emulation
+        # Enhanced YouTube headers - more realistic browser emulation
         headers = {
-            "User-Agent": "com.google.android.youtube/19.02.39 (Linux; U; Android 13; SM-G998B) gzip",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36",
             "Accept": "*/*",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Accept-Encoding": "identity",  # Disable compression to avoid issues
             "Referer": "https://www.youtube.com/",
             "Origin": "https://www.youtube.com",
-            "Range": "bytes=0-",
-            "Connection": "keep-alive",
+            "Sec-Ch-Ua": '"Not(A:Brand";v="8", "Chromium";v="133", "Google Chrome";v="133"',
+            "Sec-Ch-Ua-Mobile": "?0",
+            "Sec-Ch-Ua-Platform": '"Windows"',
             "Sec-Fetch-Dest": "video",
             "Sec-Fetch-Mode": "no-cors",
-            "Sec-Fetch-Site": "cross-site"
+            "Sec-Fetch-Site": "cross-site",
+            "Connection": "keep-alive"
         }
         
-        # Disable automatic redirects - handle manually to avoid multi-node 403
+        # Single client with no redirects - handle manually
         async with httpx.AsyncClient(
-            timeout=httpx.Timeout(120.0, connect=15.0),
-            follow_redirects=False,  # KEY CHANGE: Manual redirect handling
-            limits=httpx.Limits(max_keepalive_connections=5, max_connections=10)
+            timeout=httpx.Timeout(180.0, connect=30.0),  # Longer timeouts
+            follow_redirects=False,
+            limits=httpx.Limits(max_keepalive_connections=1, max_connections=1)  # Single connection
         ) as client:
             
-            logger.info(f"🚀 YouTube single-node download (no auto-redirects)")
+            logger.info(f"🚀 Enhanced YouTube download with manual redirects")
             
-            # First request - check for redirects
-            response = await client.get(url, headers=headers)
-            
-            # Handle redirects manually - max 3 hops to avoid poisoning
+            current_url = url
             redirect_count = 0
-            max_redirects = 3
+            max_redirects = 5  # Allow more redirects
             
-            while response.status_code in [301, 302, 303, 307, 308] and redirect_count < max_redirects:
-                redirect_url = response.headers.get('location')
-                if not redirect_url:
-                    logger.error("❌ Redirect without Location header")
+            while redirect_count <= max_redirects:
+                logger.info(f"📡 Request {redirect_count + 1}: {current_url[:80]}...")
+                
+                try:
+                    response = await client.get(current_url, headers=headers)
+                    
+                    if response.status_code in [200, 206]:
+                        # Success! Start downloading
+                        logger.info(f"✅ Got 200/206 response, starting download")
+                        
+                        downloaded = 0
+                        with open(filename, 'wb') as f:
+                            async for chunk in response.aiter_bytes(chunk_size=32768):  # Larger chunks
+                                if chunk:
+                                    f.write(chunk)
+                                    downloaded += len(chunk)
+                        
+                        logger.info(f"✅ Downloaded: {downloaded:,} bytes")
+                        return downloaded > 0  # Return True only if we got data
+                        
+                    elif response.status_code in [301, 302, 303, 307, 308]:
+                        # Handle redirect
+                        redirect_url = response.headers.get('location')
+                        if not redirect_url:
+                            logger.error("❌ Redirect without Location header")
+                            return False
+                        
+                        redirect_count += 1
+                        if redirect_count > max_redirects:
+                            logger.error(f"❌ Too many redirects ({redirect_count})")
+                            return False
+                        
+                        logger.info(f"🔄 Manual redirect {redirect_count}/{max_redirects}")
+                        current_url = redirect_url
+                        
+                        # Small delay between redirects
+                        await asyncio.sleep(0.5)
+                        continue
+                        
+                    else:
+                        logger.error(f"❌ HTTP {response.status_code}: {response.reason_phrase}")
+                        return False
+                        
+                except httpx.TimeoutException:
+                    logger.error(f"⏰ Timeout on request {redirect_count + 1}")
                     return False
-                
-                redirect_count += 1
-                logger.info(f"🔄 Manual redirect {redirect_count}/{max_redirects}: {redirect_url[:50]}...")
-                
-                # Fresh client for each redirect to avoid fingerprint tracking
-                async with httpx.AsyncClient(
-                    timeout=httpx.Timeout(120.0, connect=15.0),
-                    follow_redirects=False,
-                    limits=httpx.Limits(max_keepalive_connections=5, max_connections=10)
-                ) as redirect_client:
-                    response = await redirect_client.get(redirect_url, headers=headers)
+                except Exception as e:
+                    logger.error(f"❌ Request {redirect_count + 1} failed: {e}")
+                    return False
             
-            # Check final response
-            if response.status_code not in [200, 206]:
-                logger.error(f"❌ HTTP {response.status_code}: {response.reason_phrase}")
-                return False
-            
-            # Stream download from final URL
-            logger.info(f"📦 Starting stream download")
-            
-            downloaded = 0
-            with open(filename, 'wb') as f:
-                async for chunk in response.aiter_bytes(chunk_size=16384):
-                    f.write(chunk)
-                    downloaded += len(chunk)
-            
-            logger.info(f"✅ Downloaded: {downloaded:,} bytes")
-            return True
+            logger.error(f"❌ Exceeded maximum redirects")
+            return False
                 
     except Exception as e:
         logger.error(f"❌ Download failed: {e}")
@@ -740,18 +836,43 @@ async def download_video(data: DownloadRequest) -> DownloadResponse:
         
         logger.info(f"✅ Processing [{platform}]: {url}")
         
-        # --- J2 API EXTRACTION (ASYNC) ---
-        j2 = AsyncJ2Extractor()
-        j2_result = await j2.extract_download_url(url)
+        # --- EXTRACTION STRATEGY ---
+        # For YouTube: Try Cobalt first (avoids IP mismatch), fallback to J2
+        # For other platforms: Try J2 first, fallback to Cobalt
         
-        if not j2_result:
-            raise HTTPException(status_code=400, detail="J2Download extraction failed")
+        extraction_result = None
         
-        logger.info("✅ J2 Success. Setting up stream proxy...")
+        if platform == "youtube":
+            logger.info("🎯 YouTube detected - using Cobalt-first strategy")
+            
+            # Try Cobalt first for YouTube
+            cobalt = AsyncCobaltExtractor()
+            extraction_result = await cobalt.extract_download_url(url)
+            
+            if not extraction_result:
+                logger.info("🔄 Cobalt failed, trying J2Download as fallback")
+                j2 = AsyncJ2Extractor()
+                extraction_result = await j2.extract_download_url(url)
+        else:
+            logger.info(f"🎯 {platform} detected - using J2-first strategy")
+            
+            # Try J2 first for other platforms
+            j2 = AsyncJ2Extractor()
+            extraction_result = await j2.extract_download_url(url)
+            
+            if not extraction_result:
+                logger.info("🔄 J2Download failed, trying Cobalt as fallback")
+                cobalt = AsyncCobaltExtractor()
+                extraction_result = await cobalt.extract_download_url(url)
+        
+        if not extraction_result:
+            raise HTTPException(status_code=400, detail="All extraction methods failed")
+        
+        logger.info("✅ Extraction successful. Setting up stream proxy...")
         
         # Check if it's a multi-image post (like TikTok photo slideshow)
-        if isinstance(j2_result, dict) and "medias" in j2_result:
-            medias = j2_result["medias"]
+        if isinstance(extraction_result, dict) and "medias" in extraction_result:
+            medias = extraction_result["medias"]
             images = [m for m in medias if m.get("type") == "image"]
             
             if len(images) > 1:
@@ -795,22 +916,24 @@ async def download_video(data: DownloadRequest) -> DownloadResponse:
                                 "type": "image"
                             } for filename in downloaded_files
                         ],
-                        title=j2_result.get("title", "TikTok Photo Post"),
+                        title=extraction_result.get("title", "TikTok Photo Post"),
                         platform=platform
                     )
                 else:
                     raise HTTPException(status_code=500, detail="All image downloads failed")
         
         # For single video/audio files, use stream proxy approach
-        ext = j2_result.get("ext", "mp4")
+        ext = extraction_result.get("ext", "mp4")
+        source = extraction_result.get("source", "j2")
         
         # Store the direct URL and metadata for streaming
         stream_id = uid
         stream_data = {
-            "url": j2_result["url"],
+            "url": extraction_result["url"],
             "ext": ext,
-            "title": j2_result.get("title", "video"),
-            "platform": platform
+            "title": extraction_result.get("title", "video"),
+            "platform": platform,
+            "source": source  # Track which extractor was used
         }
         
         # Store stream data in memory (in production, use Redis or database)
@@ -818,13 +941,13 @@ async def download_video(data: DownloadRequest) -> DownloadResponse:
             app.state.streams = {}
         app.state.streams[stream_id] = stream_data
         
-        logger.info(f"✅ Stream proxy ready for {stream_id}")
+        logger.info(f"✅ Stream proxy ready for {stream_id} (via {source})")
         logger.info(f"🔗 Stream URL will be: /stream/{stream_id}")
         
         return DownloadResponse(
             status="success",
             download_url=f"/stream/{stream_id}",
-            filename=f"{j2_result.get('title', 'video')}.{ext}",
+            filename=f"{extraction_result.get('title', 'video')}.{ext}",
             message="Stream proxy ready"
         )
         
@@ -868,26 +991,40 @@ async def stream_proxy(stream_id: str) -> Stream:
         ext = stream_data["ext"]
         title = stream_data["title"]
         platform = stream_data["platform"]
+        source = stream_data.get("source", "j2")
         
-        logger.info(f"🌊 Starting stream proxy for {platform}: {stream_id}")
+        logger.info(f"🌊 Starting stream proxy for {platform}: {stream_id} (via {source})")
         logger.info(f"📺 Video URL: {video_url[:100]}...")
         
         async def stream_generator():
             """Generator that streams video data chunk by chunk"""
             try:
-                # Use appropriate headers based on platform
-                if platform == "youtube":
+                # Use appropriate headers and strategy based on source
+                if source == "cobalt":
+                    # Cobalt URLs are direct tunnels - no special headers needed
                     headers = {
-                        "User-Agent": "com.google.android.youtube/19.02.39 (Linux; U; Android 13; SM-G998B) gzip",
+                        "User-Agent": "OneTap-Server/4.0.0",
                         "Accept": "*/*",
+                        "Connection": "keep-alive"
+                    }
+                    use_redirects = True  # Cobalt handles redirects internally
+                elif platform == "youtube":
+                    headers = {
+                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36",
+                        "Accept": "*/*",
+                        "Accept-Language": "en-US,en;q=0.9",
+                        "Accept-Encoding": "identity",
                         "Referer": "https://www.youtube.com/",
                         "Origin": "https://www.youtube.com",
-                        "Range": "bytes=0-",
-                        "Connection": "keep-alive",
+                        "Sec-Ch-Ua": '"Not(A:Brand";v="8", "Chromium";v="133", "Google Chrome";v="133"',
+                        "Sec-Ch-Ua-Mobile": "?0",
+                        "Sec-Ch-Ua-Platform": '"Windows"',
                         "Sec-Fetch-Dest": "video",
                         "Sec-Fetch-Mode": "no-cors",
-                        "Sec-Fetch-Site": "cross-site"
+                        "Sec-Fetch-Site": "cross-site",
+                        "Connection": "keep-alive"
                     }
+                    use_redirects = False  # Manual redirect handling for YouTube
                 else:
                     # Generic headers for other platforms
                     headers = {
@@ -896,38 +1033,70 @@ async def stream_proxy(stream_id: str) -> Stream:
                         "Referer": video_url.split('/')[0] + '//' + video_url.split('/')[2] + '/',
                         "Connection": "keep-alive"
                     }
+                    use_redirects = True
                 
-                # Create HTTP client with no redirects (handle manually for YouTube)
+                # Create HTTP client with settings based on source
+                timeout_settings = httpx.Timeout(180.0, connect=30.0) if source == "cobalt" else httpx.Timeout(180.0, connect=30.0)
+                connection_limits = httpx.Limits(max_keepalive_connections=1, max_connections=1) if platform == "youtube" and source != "cobalt" else httpx.Limits(max_keepalive_connections=5, max_connections=10)
+                
                 async with httpx.AsyncClient(
-                    timeout=httpx.Timeout(120.0, connect=15.0),
-                    follow_redirects=False if platform == "youtube" else True,
-                    limits=httpx.Limits(max_keepalive_connections=5, max_connections=10)
+                    timeout=timeout_settings,
+                    follow_redirects=use_redirects,
+                    limits=connection_limits
                 ) as client:
                     
-                    logger.info(f"🚀 Connecting to {platform} source...")
+                    logger.info(f"🚀 Connecting to {source} source...")
                     
-                    # Handle YouTube redirects manually
-                    if platform == "youtube":
+                    if source == "cobalt":
+                        # Cobalt URLs are direct - just stream them
+                        logger.info("📡 Direct Cobalt stream (no redirect handling needed)")
                         response = await client.get(video_url, headers=headers)
                         
-                        # Handle redirects manually for YouTube
+                        if response.status_code not in [200, 206]:
+                            logger.error(f"❌ Cobalt HTTP {response.status_code}: {response.reason_phrase}")
+                            return
+                            
+                    elif platform == "youtube" and source != "cobalt":
+                        # YouTube from J2Download - needs manual redirect handling
+                        logger.info("📡 YouTube J2Download stream (manual redirect handling)")
+                        current_url = video_url
                         redirect_count = 0
-                        max_redirects = 3
+                        max_redirects = 5
                         
-                        while response.status_code in [301, 302, 303, 307, 308] and redirect_count < max_redirects:
-                            redirect_url = response.headers.get('location')
-                            if not redirect_url:
-                                logger.error("❌ Redirect without Location header")
+                        while redirect_count <= max_redirects:
+                            try:
+                                response = await client.get(current_url, headers=headers)
+                                
+                                if response.status_code in [200, 206]:
+                                    # Success!
+                                    break
+                                elif response.status_code in [301, 302, 303, 307, 308]:
+                                    redirect_url = response.headers.get('location')
+                                    if not redirect_url:
+                                        logger.error("❌ Redirect without Location header")
+                                        return
+                                    
+                                    redirect_count += 1
+                                    if redirect_count > max_redirects:
+                                        logger.error(f"❌ Too many redirects ({redirect_count})")
+                                        return
+                                    
+                                    logger.info(f"🔄 Manual redirect {redirect_count}/{max_redirects}")
+                                    current_url = redirect_url
+                                    
+                                    # Small delay between redirects
+                                    await asyncio.sleep(0.5)
+                                    continue
+                                else:
+                                    logger.error(f"❌ HTTP {response.status_code}: {response.reason_phrase}")
+                                    return
+                                    
+                            except Exception as e:
+                                logger.error(f"❌ Request failed: {e}")
                                 return
-                            
-                            redirect_count += 1
-                            logger.info(f"🔄 Manual redirect {redirect_count}/{max_redirects}")
-                            
-                            # Fresh request for redirect
-                            response = await client.get(redirect_url, headers=headers)
                         
                         if response.status_code not in [200, 206]:
-                            logger.error(f"❌ HTTP {response.status_code}: {response.reason_phrase}")
+                            logger.error(f"❌ Final response: HTTP {response.status_code}")
                             return
                     else:
                         # Direct request for other platforms
@@ -937,16 +1106,16 @@ async def stream_proxy(stream_id: str) -> Stream:
                             logger.error(f"❌ HTTP {response.status_code}: {response.reason_phrase}")
                             return
                     
-                    logger.info(f"✅ Connected! Streaming {platform} content...")
+                    logger.info(f"✅ Connected! Streaming {source} content...")
                     
                     # Stream the content chunk by chunk
                     total_bytes = 0
-                    async for chunk in response.aiter_bytes(chunk_size=16384):
+                    async for chunk in response.aiter_bytes(chunk_size=32768):  # Larger chunks for better performance
                         if chunk:
                             total_bytes += len(chunk)
                             yield chunk
                     
-                    logger.info(f"✅ Stream complete: {total_bytes:,} bytes streamed")
+                    logger.info(f"✅ Stream complete: {total_bytes:,} bytes streamed via {source}")
                     
                     # Clean up stream data after successful completion
                     if hasattr(app.state, 'streams') and stream_id in app.state.streams:
