@@ -522,25 +522,150 @@ class AsyncJ2Extractor:
             logger.error(f"❌ J2 Failed: {e}")
             return None
 
-async def download_to_server(url: str, filename: str) -> bool:
-    """Downloads file from URL to server - ASYNC VERSION with HTTPX"""
+async def download_to_server_with_retry(url: str, filename: str, max_retries: int = 3) -> bool:
+    """Downloads file with retry logic for better reliability"""
+    for attempt in range(max_retries):
+        try:
+            logger.info(f"📥 Download attempt {attempt + 1}/{max_retries}: {url}")
+            success = await download_to_server(url, filename)
+            if success:
+                return True
+            else:
+                logger.warning(f"⚠️ Attempt {attempt + 1} failed, retrying...")
+                await asyncio.sleep(1)  # Brief delay before retry
+        except Exception as e:
+            logger.warning(f"⚠️ Attempt {attempt + 1} failed with error: {e}")
+            if attempt < max_retries - 1:
+                await asyncio.sleep(2)  # Longer delay on exception
+    
+    logger.error(f"❌ All {max_retries} download attempts failed")
+    return False
+    """Downloads file from URL to server - ASYNC VERSION with HTTPX and proper redirect handling"""
     try:
         headers = {
             "User-Agent": EXACT_UA,
             "Accept": "*/*",
-            "Connection": "keep-alive"
+            "Accept-Encoding": "gzip, deflate, br",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Connection": "keep-alive",
+            "Sec-Fetch-Dest": "video",
+            "Sec-Fetch-Mode": "no-cors",
+            "Sec-Fetch-Site": "cross-site"
         }
         
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            async with client.stream('GET', url, headers=headers) as response:
-                response.raise_for_status()
+        # Enhanced client configuration for better redirect handling
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(60.0, connect=10.0),
+            follow_redirects=True,
+            max_redirects=20,  # Increased redirect limit
+            headers=headers,
+            limits=httpx.Limits(max_keepalive_connections=5, max_connections=10)
+        ) as client:
+            
+            # First, try a HEAD request to resolve redirects
+            try:
+                head_response = await client.head(url, headers=headers)
+                if head_response.status_code == 200:
+                    final_url = str(head_response.url)
+                    logger.info(f"🔗 Resolved final URL: {final_url}")
+                else:
+                    final_url = url
+            except Exception as e:
+                logger.warning(f"⚠️ HEAD request failed, using original URL: {e}")
+                final_url = url
+            
+            # Now download from the final URL
+            async with client.stream('GET', final_url, headers=headers) as response:
+                if response.status_code != 200:
+                    logger.error(f"❌ HTTP {response.status_code}: {response.reason_phrase}")
+                    return False
+                
+                # Check content type
+                content_type = response.headers.get('content-type', '')
+                logger.info(f"📥 Content-Type: {content_type}")
+                
+                # Stream download with progress
+                total_size = int(response.headers.get('content-length', 0))
+                downloaded = 0
+                
                 with open(filename, 'wb') as f:
                     async for chunk in response.aiter_bytes(chunk_size=8192):
                         f.write(chunk)
-        return True
+                        downloaded += len(chunk)
+                        
+                        # Log progress for large files
+                        if total_size > 0 and downloaded % (1024 * 1024) == 0:  # Every MB
+                            progress = (downloaded / total_size) * 100
+                            logger.info(f"📥 Download progress: {progress:.1f}%")
+                
+                logger.info(f"✅ Download completed: {downloaded} bytes")
+                return True
+                
+    except httpx.HTTPStatusError as e:
+        logger.error(f"❌ HTTP Status Error: {e.response.status_code} - {e.response.reason_phrase}")
+        return False
+    except httpx.RequestError as e:
+        logger.error(f"❌ Request Error: {e}")
+        return False
     except Exception as e:
         logger.error(f"❌ File Save Failed: {e}")
         return False
+
+@get("/version")
+async def get_version() -> Dict[str, Any]:
+    """Version endpoint for system updates"""
+    return {
+        "version": "4.0.0",
+        "latest_version": 400,  # Version code for comparison
+        "apk_url": "https://github.com/YourUsername/OneTap/releases/download/v4.0.0/OneTap_v4.0.0.apk",
+        "release_notes": "🚀 Major Update v4.0.0\n\n✨ New Features:\n• Lightning-fast async processing\n• Support for 50+ platforms\n• Enhanced TikTok photo slideshow downloads\n• Improved error handling and retry logic\n\n🔧 Improvements:\n• Better network stability\n• Faster download speeds\n• Reduced memory usage\n• Enhanced UI responsiveness\n\n🐛 Bug Fixes:\n• Fixed duplicate detection issues\n• Resolved timeout problems on slow networks\n• Fixed crashes on certain device configurations",
+        "status": "online",
+        "service": "Universal Media Downloader - ASYNC EDITION",
+        "framework": "Litestar (ASGI)",
+        "performance": "High-Concurrency Async",
+        "total_platforms": 50,
+        "features": [
+            "Lightning-fast async processing",
+            "Handle thousands of concurrent downloads",
+            "Download videos without watermarks (TikTok, etc.)",
+            "Support for images, videos, and audio",
+            "Multiple format support (.mp4, .mp3, .jpg, .png)",
+            "Works on all devices (PC, Mac, Android, iOS)",
+            "Photo slideshow downloads in MP4 format",
+            "Free service with no registration required"
+        ],
+        "supported_platforms": {
+            "video_platforms": [
+                "TikTok", "Douyin", "Capcut", "YouTube", "Vimeo", "Dailymotion", 
+                "Bilibili", "Rumble", "Streamable", "Ted", "SohuTv", "Bitchute"
+            ],
+            "social_media": [
+                "Instagram", "Facebook", "Threads", "Twitter/X", "Snapchat", 
+                "Pinterest", "Reddit", "Tumblr", "LinkedIn", "Bluesky", "Telegram"
+            ],
+            "chinese_platforms": [
+                "Kuaishou", "Xiaohongshu", "Ixigua", "Weibo", "Miaopai", 
+                "Meipai", "Xiaoying", "Yingke", "Sina", "QQ"
+            ],
+            "indian_platforms": [
+                "Sharechat", "Likee", "Hipi"
+            ],
+            "audio_platforms": [
+                "Soundcloud", "Mixcloud", "Spotify", "Deezer", "Zingmp3", 
+                "Bandcamp", "Castbox"
+            ],
+            "entertainment": [
+                "ESPN", "IMDB", "Imgur", "iFunny", "Izlesene", "9GAG", 
+                "oke.ru", "Febspot", "Getstickerpack"
+            ],
+            "file_sharing": [
+                "Mediafire"
+            ],
+            "adult_content": [
+                "Pornbox", "Xvideos", "Xnxx"
+            ]
+        }
+    }
 
 @get("/")
 async def index() -> Dict[str, Any]:
@@ -581,6 +706,9 @@ async def index() -> Dict[str, Any]:
         "status": "online",
         "service": "Universal Media Downloader - ASYNC EDITION",
         "version": "4.0.0",
+        "latest_version": 400,  # Version code for comparison
+        "apk_url": "https://github.com/YourUsername/OneTap/releases/download/v4.0.0/OneTap_v4.0.0.apk",
+        "release_notes": "🚀 Major Update v4.0.0\n\n✨ New Features:\n• Lightning-fast async processing\n• Support for 50+ platforms\n• Enhanced TikTok photo slideshow downloads\n• Improved error handling and retry logic\n\n🔧 Improvements:\n• Better network stability\n• Faster download speeds\n• Reduced memory usage\n• Enhanced UI responsiveness\n\n🐛 Bug Fixes:\n• Fixed duplicate detection issues\n• Resolved timeout problems on slow networks\n• Fixed crashes on certain device configurations",
         "framework": "Litestar (ASGI)",
         "performance": "High-Concurrency Async",
         "supported_platforms": supported_platforms,
@@ -601,7 +729,8 @@ async def index() -> Dict[str, Any]:
         },
         "endpoints": {
             "download": "/download (POST)",
-            "files": "/files/<filename> (GET)"
+            "files": "/files/<filename> (GET)",
+            "version": "/version (GET)"
         }
     }
 
@@ -653,8 +782,8 @@ async def download_video(data: DownloadRequest) -> DownloadResponse:
                     filepath = os.path.join(DOWNLOAD_DIR, filename)
                     filenames.append(filename)
                     
-                    # Create async download task
-                    download_tasks.append(download_to_server(image["url"], filepath))
+                    # Create async download task with retry
+                    download_tasks.append(download_to_server_with_retry(image["url"], filepath))
                 
                 # Execute all downloads concurrently
                 results = await asyncio.gather(*download_tasks, return_exceptions=True)
@@ -693,7 +822,7 @@ async def download_video(data: DownloadRequest) -> DownloadResponse:
                 filename = f"{uid}.{ext}"
                 filepath = os.path.join(DOWNLOAD_DIR, filename)
                 
-                if await download_to_server(j2_result["url"], filepath):
+                if await download_to_server_with_retry(j2_result["url"], filepath):
                     final_filename = filename
                 else:
                     raise HTTPException(status_code=500, detail="Download failed")
@@ -703,7 +832,7 @@ async def download_video(data: DownloadRequest) -> DownloadResponse:
             filename = f"{uid}.{ext}"
             filepath = os.path.join(DOWNLOAD_DIR, filename)
             
-            if await download_to_server(j2_result["url"], filepath):
+            if await download_to_server_with_retry(j2_result["url"], filepath):
                 final_filename = filename
             else:
                 raise HTTPException(status_code=500, detail="Download failed")
@@ -733,7 +862,7 @@ async def serve_file(filename: str) -> File:
 
 # Create Litestar app
 app = Litestar(
-    route_handlers=[index, download_video, serve_file]
+    route_handlers=[index, get_version, download_video, serve_file]
 )
 
 if __name__ == "__main__":
