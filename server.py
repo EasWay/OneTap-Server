@@ -523,42 +523,26 @@ class AsyncJ2Extractor:
             return None
 
 async def download_to_server_with_retry(url: str, filename: str, max_retries: int = 3) -> bool:
-    """Downloads file with retry logic for better reliability"""
-    for attempt in range(max_retries):
-        try:
-            logger.info(f"📥 Download attempt {attempt + 1}/{max_retries}: {url}")
-            success = await download_to_server(url, filename)
-            if success:
-                return True
-            else:
-                logger.warning(f"⚠️ Attempt {attempt + 1} failed, retrying...")
-                await asyncio.sleep(1)  # Brief delay before retry
-        except Exception as e:
-            logger.warning(f"⚠️ Attempt {attempt + 1} failed with error: {e}")
-            if attempt < max_retries - 1:
-                await asyncio.sleep(2)  # Longer delay on exception
-    
-    logger.error(f"❌ All {max_retries} download attempts failed")
-    return False
+    """Single attempt download - googlevideo URLs are single-use, retries poison the URL"""
+    return await download_to_server(url, filename)
 
 async def download_to_server(url: str, filename: str) -> bool:
-    """Downloads file from URL to server - Single clean GET request to avoid YouTube anti-hotlink"""
+    """Downloads file from URL - Full YouTube Android client emulation"""
     try:
-        # Realistic Android browser headers - no HEAD probing
+        # Exact YouTube Android app headers - full client emulation
         headers = {
-            "User-Agent": "Mozilla/5.0 (Linux; Android 13; SM-G998B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Mobile Safari/537.36",
+            "User-Agent": "com.google.android.youtube/19.02.39 (Linux; U; Android 13; SM-G998B) gzip",
             "Accept": "*/*",
-            "Accept-Encoding": "identity",  # Avoid compression issues
-            "Accept-Language": "en-US,en;q=0.9",
             "Referer": "https://www.youtube.com/",
-            "Range": "bytes=0-",  # Critical for YouTube - signals legitimate range request
+            "Origin": "https://www.youtube.com",
+            "Range": "bytes=0-",
             "Connection": "keep-alive",
             "Sec-Fetch-Dest": "video",
             "Sec-Fetch-Mode": "no-cors",
             "Sec-Fetch-Site": "cross-site"
         }
         
-        # Single GET request with redirect following - NO HEAD REQUESTS
+        # Fresh client for each request - new TLS fingerprint
         async with httpx.AsyncClient(
             timeout=httpx.Timeout(120.0, connect=15.0),
             follow_redirects=True,
@@ -566,9 +550,9 @@ async def download_to_server(url: str, filename: str) -> bool:
             limits=httpx.Limits(max_keepalive_connections=5, max_connections=10)
         ) as client:
             
-            logger.info(f"🚀 Starting single GET request (no HEAD probing)")
+            logger.info(f"🚀 YouTube Android client download")
             
-            # Direct GET request - let httpx handle all redirects silently
+            # Single GET request - let httpx handle redirects
             async with client.stream('GET', url, headers=headers) as response:
                 
                 # Handle partial content (206) or success (200)
@@ -581,7 +565,6 @@ async def download_to_server(url: str, filename: str) -> bool:
                 logger.info(f"� Conte nt-Type: {response.headers.get('content-type', '')}, Size: {content_length} bytes")
                 
                 # Stream download
-                total_size = int(content_length) if content_length.isdigit() else 0
                 downloaded = 0
                 
                 with open(filename, 'wb') as f:
@@ -589,17 +572,11 @@ async def download_to_server(url: str, filename: str) -> bool:
                         f.write(chunk)
                         downloaded += len(chunk)
                 
-                logger.info(f"✅ Download completed: {downloaded:,} bytes")
+                logger.info(f"✅ Downloaded: {downloaded:,} bytes")
                 return True
                 
-    except httpx.HTTPStatusError as e:
-        logger.error(f"❌ HTTP Status Error: {e.response.status_code} - {e.response.reason_phrase}")
-        return False
-    except httpx.RequestError as e:
-        logger.error(f"❌ Request Error: {e}")
-        return False
     except Exception as e:
-        logger.error(f"❌ Download Failed: {e}")
+        logger.error(f"❌ Download failed: {e}")
         return False
 
 @get("/version")
