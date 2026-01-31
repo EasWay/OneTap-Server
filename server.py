@@ -542,65 +542,64 @@ async def download_to_server_with_retry(url: str, filename: str, max_retries: in
     return False
 
 async def download_to_server(url: str, filename: str) -> bool:
-    """Downloads file from URL to server - ASYNC VERSION with HTTPX and proper redirect handling"""
+    """Downloads file from URL to server - Single clean GET request to avoid YouTube anti-hotlink"""
     try:
+        # Realistic Android browser headers - no HEAD probing
         headers = {
-            "User-Agent": EXACT_UA,
+            "User-Agent": "Mozilla/5.0 (Linux; Android 13; SM-G998B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Mobile Safari/537.36",
             "Accept": "*/*",
-            "Accept-Encoding": "gzip, deflate, br",
+            "Accept-Encoding": "identity",  # Avoid compression issues
             "Accept-Language": "en-US,en;q=0.9",
+            "Referer": "https://www.youtube.com/",
+            "Range": "bytes=0-",  # Critical for YouTube - signals legitimate range request
             "Connection": "keep-alive",
             "Sec-Fetch-Dest": "video",
             "Sec-Fetch-Mode": "no-cors",
             "Sec-Fetch-Site": "cross-site"
         }
         
-        # Enhanced client configuration for better redirect handling
+        # Single GET request with redirect following
         async with httpx.AsyncClient(
-            timeout=httpx.Timeout(60.0, connect=10.0),
+            timeout=httpx.Timeout(120.0, connect=15.0),  # Longer timeout for large files
             follow_redirects=True,
-            max_redirects=20,  # Increased redirect limit
-            headers=headers,
+            max_redirects=25,  # YouTube can have many redirects
             limits=httpx.Limits(max_keepalive_connections=5, max_connections=10)
         ) as client:
             
-            # First, try a HEAD request to resolve redirects
-            try:
-                head_response = await client.head(url, headers=headers)
-                if head_response.status_code == 200:
-                    final_url = str(head_response.url)
-                    logger.info(f"🔗 Resolved final URL: {final_url}")
-                else:
-                    final_url = url
-            except Exception as e:
-                logger.warning(f"⚠️ HEAD request failed, using original URL: {e}")
-                final_url = url
+            logger.info(f"🚀 Starting single GET request (no HEAD probing)")
             
-            # Now download from the final URL
-            async with client.stream('GET', final_url, headers=headers) as response:
-                if response.status_code != 200:
+            # Single clean GET request - let httpx handle all redirects
+            async with client.stream('GET', url, headers=headers) as response:
+                
+                # Handle partial content (206) or success (200)
+                if response.status_code not in [200, 206]:
                     logger.error(f"❌ HTTP {response.status_code}: {response.reason_phrase}")
                     return False
                 
+                # Log final URL after redirects
+                final_url = str(response.url)
+                logger.info(f"🔗 Final URL after redirects: {final_url}")
+                
                 # Check content type
                 content_type = response.headers.get('content-type', '')
-                logger.info(f"📥 Content-Type: {content_type}")
+                content_length = response.headers.get('content-length', '0')
+                logger.info(f"📥 Content-Type: {content_type}, Size: {content_length} bytes")
                 
-                # Stream download with progress
-                total_size = int(response.headers.get('content-length', 0))
+                # Stream download
+                total_size = int(content_length) if content_length.isdigit() else 0
                 downloaded = 0
                 
                 with open(filename, 'wb') as f:
-                    async for chunk in response.aiter_bytes(chunk_size=8192):
+                    async for chunk in response.aiter_bytes(chunk_size=16384):  # Larger chunks
                         f.write(chunk)
                         downloaded += len(chunk)
                         
-                        # Log progress for large files
-                        if total_size > 0 and downloaded % (1024 * 1024) == 0:  # Every MB
+                        # Log progress every 5MB for large files
+                        if total_size > 0 and downloaded % (5 * 1024 * 1024) == 0:
                             progress = (downloaded / total_size) * 100
-                            logger.info(f"📥 Download progress: {progress:.1f}%")
+                            logger.info(f"📥 Download progress: {progress:.1f}% ({downloaded:,} bytes)")
                 
-                logger.info(f"✅ Download completed: {downloaded} bytes")
+                logger.info(f"✅ Download completed: {downloaded:,} bytes")
                 return True
                 
     except httpx.HTTPStatusError as e:
@@ -610,7 +609,7 @@ async def download_to_server(url: str, filename: str) -> bool:
         logger.error(f"❌ Request Error: {e}")
         return False
     except Exception as e:
-        logger.error(f"❌ File Save Failed: {e}")
+        logger.error(f"❌ Download Failed: {e}")
         return False
 
 @get("/version")
