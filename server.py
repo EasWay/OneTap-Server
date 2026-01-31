@@ -540,6 +540,8 @@ async def download_to_server_with_retry(url: str, filename: str, max_retries: in
     
     logger.error(f"❌ All {max_retries} download attempts failed")
     return False
+
+async def download_to_server(url: str, filename: str) -> bool:
     """Downloads file from URL to server - ASYNC VERSION with HTTPX and proper redirect handling"""
     try:
         headers = {
