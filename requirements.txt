@@ -1,8 +1,6 @@
-flask==3.0.0
-flask-cors==4.0.0
-yt-dlp @ git+https://github.com/yt-dlp/yt-dlp.git@master
-requests==2.31.0
-flask==3.0.0
-flask-cors==4.0.0
-requests==2.31.0
-yt-dlp
+# Modern Async Stack
+litestar==2.5.3
+pydantic==2.5.3
+httpx==0.26.0
+uvloop==0.19.0
+uvicorn==0.25.0

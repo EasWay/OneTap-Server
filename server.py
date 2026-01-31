@@ -1,30 +1,30 @@
 import os
 import uuid
-import yt_dlp
 import logging
-import shutil
-import requests
-import time
 import re
-import json
-from flask import Flask, request, jsonify, send_from_directory
-from urllib.parse import urlparse, urlunparse
+import asyncio
+import uvloop
+from typing import Dict, List, Optional, Any
+from urllib.parse import urlparse
+
+# Modern Async Stack
+from litestar import Litestar, get, post
+from litestar.response import File
+from litestar.exceptions import HTTPException
+from pydantic import BaseModel, validator
+import httpx
 
 # Configure logging
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-app = Flask(__name__)
+# Set uvloop as the event loop policy for maximum performance
+asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 
 # --- CONFIGURATION ---
 DOWNLOAD_DIR = os.path.join(os.getcwd(), "downloads")
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
-
-# Cookie paths
-GOOGLE_COOKIES_FILE = os.path.join(os.getcwd(), "google_cookies.txt")
-SOCIAL_COOKIES_FILE = os.path.join(os.getcwd(), "cookies.txt")
-AUTH_PROFILE_DIR = os.path.join(os.getcwd(), "chrome_profile")
 
 # Exact UA for consistency
 EXACT_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
@@ -34,15 +34,44 @@ J2_BASE_URL = "https://j2download.com"
 J2_API_URL = f"{J2_BASE_URL}/api/autolink"
 J2_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36"
 
-def remove_query_params(url):
+# --- PYDANTIC MODELS ---
+class DownloadRequest(BaseModel):
+    url: str
+    
+    @validator('url')
+    def validate_url(cls, v):
+        if not v or not v.strip():
+            raise ValueError('URL cannot be empty')
+        # Clean URL text if needed
+        match = re.search(r'(https?://[^\s]+)', v)
+        if match:
+            return match.group(1)
+        if not v.startswith(('http://', 'https://')):
+            raise ValueError('URL must start with http:// or https://')
+        return v
+
+class DownloadResponse(BaseModel):
+    status: str
+    download_url: Optional[str] = None
+    filename: Optional[str] = None
+    message: Optional[str] = None
+    type: Optional[str] = None
+    total_images: Optional[int] = None
+    files: Optional[List[Dict[str, Any]]] = None
+    title: Optional[str] = None
+    platform: Optional[str] = None
+
+def remove_query_params(url: str) -> str:
     """Removes tracking parameters"""
     try:
-        if "?" in url: return url.split("?")[0]
+        if "?" in url: 
+            return url.split("?")[0]
         return url
-    except: return url
+    except: 
+        return url
 
-def expand_short_url(url):
-    """Resolves short URLs for all supported platforms"""
+async def expand_short_url(url: str) -> str:
+    """Resolves short URLs for all supported platforms - ASYNC VERSION"""
     try:
         short_domains = [
             # TikTok & Related
@@ -61,30 +90,33 @@ def expand_short_url(url):
         if any(x in url for x in short_domains):
             logger.info(f"🔗 Expanding short URL: {url}")
             headers = {"User-Agent": J2_UA}
-            try:
-                resp = requests.head(url, allow_redirects=True, headers=headers, timeout=10)
-                if resp.status_code >= 400: raise Exception("Head failed")
-            except:
-                resp = requests.get(url, allow_redirects=True, headers=headers, stream=True, timeout=10)
-                resp.close()
-            resolved = resp.url
-            if "login" not in resolved and "error" not in resolved:
-                clean = remove_query_params(resolved)
-                logger.info(f"✅ Resolved to: {clean}")
-                return clean
+            
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                try:
+                    resp = await client.head(url, headers=headers, follow_redirects=True)
+                    if resp.status_code >= 400:
+                        raise Exception("Head failed")
+                except:
+                    resp = await client.get(url, headers=headers, follow_redirects=True)
+                
+                resolved = str(resp.url)
+                if "login" not in resolved and "error" not in resolved:
+                    clean = remove_query_params(resolved)
+                    logger.info(f"✅ Resolved to: {clean}")
+                    return clean
     except Exception as e:
         logger.warning(f"⚠️ URL Expansion failed: {e}")
     return remove_query_params(url)
 
-def clean_url_text(text):
+def clean_url_text(text: str) -> str:
     match = re.search(r'(https?://[^\s]+)', text)
-    if match: return match.group(1)
+    if match: 
+        return match.group(1)
     return text
 
-def detect_platform(url):
+def detect_platform(url: str) -> str:
     """Enhanced platform detection for 50+ supported platforms"""
     domain = urlparse(url).netloc.lower()
-    path = urlparse(url).path.lower()
     
     # TikTok & Related
     if any(x in domain for x in ["tiktok.com", "vm.tiktok.com", "vt.tiktok.com"]): return "tiktok"
@@ -158,7 +190,7 @@ def detect_platform(url):
     # File Sharing
     if "mediafire.com" in domain: return "mediafire"
     
-    # Adult Content (if needed)
+    # Adult Content
     if "pornbox.com" in domain: return "pornbox"
     if "xvideos.com" in domain: return "xvideos"
     if "xnxx.com" in domain: return "xnxx"
@@ -340,187 +372,178 @@ class J2ResponseParser:
         
         return medias[0]
 
-class J2Extractor:
-    def extract_download_url(self, video_url):
+class AsyncJ2Extractor:
+    async def extract_download_url(self, video_url: str) -> Optional[Dict[str, Any]]:
         try:
             platform = detect_platform(video_url)
             logger.info(f"🎯 J2 Extraction for {platform}: {video_url}")
             
-            session = requests.Session()
-            
-            # Step 1: Navigation headers (simulate typing URL in browser)
-            nav_headers = {
-                "User-Agent": J2_UA,
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-                "Accept-Language": "en-US,en;q=0.9",
-                "Sec-Ch-Ua": '"Not(A:Brand";v="8", "Chromium";v="144", "Google Chrome";v="144"',
-                "Sec-Ch-Ua-Mobile": "?0",
-                "Sec-Ch-Ua-Platform": '"Windows"',
-                "Sec-Fetch-Dest": "document",
-                "Sec-Fetch-Mode": "navigate",
-                "Sec-Fetch-Site": "none",
-                "Sec-Fetch-User": "?1",
-                "Upgrade-Insecure-Requests": "1"
-            }
-            
-            session.headers.update(nav_headers)
-            
-            # Handshake with navigation headers
-            logger.info("🤝 Performing J2Download handshake...")
-            home_resp = session.get(J2_BASE_URL, timeout=15)
-            
-            if home_resp.status_code != 200:
-                logger.warning(f"⚠️ Handshake returned status {home_resp.status_code}")
-                return None
-            
-            # Deep Token Extraction - Priority 1: Cookies
-            csrf_token = session.cookies.get("csrf_token")
-            
-            # Priority 2: HTML Meta Tags
-            if not csrf_token:
-                logger.info("🔍 Searching HTML for CSRF token...")
-                meta_match = re.search(r'<meta\s+name="csrf-token"\s+content="([^"]+)"', home_resp.text)
-                if meta_match:
-                    csrf_token = meta_match.group(1)
-                    logger.info("✅ Found CSRF token in Meta Tag")
-            
-            # Priority 3: JavaScript Variables
-            if not csrf_token:
-                js_match = re.search(r'csrf_token\s*=\s*["\']([^"\']+)["\']', home_resp.text)
-                if js_match:
-                    csrf_token = js_match.group(1)
-                    logger.info("✅ Found CSRF token in JS")
-            
-            # Priority 4: Laravel Token Pattern
-            if not csrf_token:
-                laravel_match = re.search(r'_token["\']?\s*:\s*["\']([^"\']+)["\']', home_resp.text)
-                if laravel_match:
-                    csrf_token = laravel_match.group(1)
-                    logger.info("✅ Found Laravel token")
-            
-            # Priority 5: XSRF Token (alternative name)
-            if not csrf_token:
-                xsrf_match = re.search(r'xsrf[_-]?token["\']?\s*[:=]\s*["\']([^"\']+)["\']', home_resp.text, re.IGNORECASE)
-                if xsrf_match:
-                    csrf_token = xsrf_match.group(1)
-                    logger.info("✅ Found XSRF token")
-            
-            if not csrf_token: 
-                logger.warning("⚠️ No CSRF token found after deep search")
-                return None
-            
-            logger.info(f"✅ CSRF token acquired: {csrf_token[:10]}...")
-            
-            # Step 2: Switch to XHR headers for API call
-            xhr_headers = {
-                "Referer": f"{J2_BASE_URL}/",
-                "Origin": J2_BASE_URL,
-                "Content-Type": "application/json",
-                "Accept": "application/json, text/plain, */*",
-                "Sec-Fetch-Dest": "empty",
-                "Sec-Fetch-Mode": "cors",
-                "Sec-Fetch-Site": "same-origin",
-                "x-csrf-token": csrf_token,
-                "X-Requested-With": "XMLHttpRequest"
-            }
-            
-            # Update session with XHR headers
-            session.headers.update(xhr_headers)
-            
-            payload = {
-                "data": {
-                    "url": video_url,
-                    "unlock": True
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                # Step 1: Navigation headers (simulate typing URL in browser)
+                nav_headers = {
+                    "User-Agent": J2_UA,
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+                    "Accept-Language": "en-US,en;q=0.9",
+                    "Sec-Ch-Ua": '"Not(A:Brand";v="8", "Chromium";v="144", "Google Chrome";v="144"',
+                    "Sec-Ch-Ua-Mobile": "?0",
+                    "Sec-Ch-Ua-Platform": '"Windows"',
+                    "Sec-Fetch-Dest": "document",
+                    "Sec-Fetch-Mode": "navigate",
+                    "Sec-Fetch-Site": "none",
+                    "Sec-Fetch-User": "?1",
+                    "Upgrade-Insecure-Requests": "1"
                 }
-            }
-            
-            logger.info(f"🚀 Sending J2Download API request...")
-            logger.info(f"📤 Payload: {payload}")
-            
-            response = session.post(J2_API_URL, json=payload, timeout=30)
-            
-            logger.info(f"📥 Response status: {response.status_code}")
-            
-            if response.status_code != 200:
-                logger.error(f"❌ J2Download API HTTP error: {response.status_code}")
+                
+                # Handshake with navigation headers
+                logger.info("🤝 Performing J2Download handshake...")
+                home_resp = await client.get(J2_BASE_URL, headers=nav_headers)
+                
+                if home_resp.status_code != 200:
+                    logger.warning(f"⚠️ Handshake returned status {home_resp.status_code}")
+                    return None
+                
+                # Deep Token Extraction - Priority 1: Cookies
+                csrf_token = home_resp.cookies.get("csrf_token")
+                
+                # Priority 2: HTML Meta Tags
+                if not csrf_token:
+                    logger.info("🔍 Searching HTML for CSRF token...")
+                    meta_match = re.search(r'<meta\s+name="csrf-token"\s+content="([^"]+)"', home_resp.text)
+                    if meta_match:
+                        csrf_token = meta_match.group(1)
+                        logger.info("✅ Found CSRF token in Meta Tag")
+                
+                # Priority 3: JavaScript Variables
+                if not csrf_token:
+                    js_match = re.search(r'csrf_token\s*=\s*["\']([^"\']+)["\']', home_resp.text)
+                    if js_match:
+                        csrf_token = js_match.group(1)
+                        logger.info("✅ Found CSRF token in JS")
+                
+                # Priority 4: Laravel Token Pattern
+                if not csrf_token:
+                    laravel_match = re.search(r'_token["\']?\s*:\s*["\']([^"\']+)["\']', home_resp.text)
+                    if laravel_match:
+                        csrf_token = laravel_match.group(1)
+                        logger.info("✅ Found Laravel token")
+                
+                # Priority 5: XSRF Token (alternative name)
+                if not csrf_token:
+                    xsrf_match = re.search(r'xsrf[_-]?token["\']?\s*[:=]\s*["\']([^"\']+)["\']', home_resp.text, re.IGNORECASE)
+                    if xsrf_match:
+                        csrf_token = xsrf_match.group(1)
+                        logger.info("✅ Found XSRF token")
+                
+                if not csrf_token: 
+                    logger.warning("⚠️ No CSRF token found after deep search")
+                    return None
+                
+                logger.info(f"✅ CSRF token acquired: {csrf_token[:10]}...")
+                
+                # Step 2: Switch to XHR headers for API call
+                xhr_headers = {
+                    "User-Agent": J2_UA,
+                    "Referer": f"{J2_BASE_URL}/",
+                    "Origin": J2_BASE_URL,
+                    "Content-Type": "application/json",
+                    "Accept": "application/json, text/plain, */*",
+                    "Sec-Fetch-Dest": "empty",
+                    "Sec-Fetch-Mode": "cors",
+                    "Sec-Fetch-Site": "same-origin",
+                    "x-csrf-token": csrf_token,
+                    "X-Requested-With": "XMLHttpRequest"
+                }
+                
+                payload = {
+                    "data": {
+                        "url": video_url,
+                        "unlock": True
+                    }
+                }
+                
+                logger.info(f"🚀 Sending J2Download API request...")
+                logger.info(f"📤 Payload: {payload}")
+                
+                response = await client.post(J2_API_URL, json=payload, headers=xhr_headers, cookies=home_resp.cookies)
+                
+                logger.info(f"📥 Response status: {response.status_code}")
+                
+                if response.status_code != 200:
+                    logger.error(f"❌ J2Download API HTTP error: {response.status_code}")
+                    try:
+                        error_data = response.json()
+                        logger.error(f"❌ Error response: {error_data}")
+                    except:
+                        logger.error(f"❌ Raw error response: {response.text[:500]}")
+                    return None
+                
                 try:
-                    error_data = response.json()
-                    logger.error(f"❌ Error response: {error_data}")
-                except:
-                    logger.error(f"❌ Raw error response: {response.text[:500]}")
-                return None
-            
-            try:
-                data = response.json()
-                logger.info(f"📥 J2Download response: {data}")
-            except Exception as e:
-                logger.error(f"❌ Failed to parse JSON: {e}")
-                logger.error(f"❌ Raw response: {response.text[:1000]}")
-                return None
-            
-            if "error" in data and data["error"]: 
-                logger.warning(f"⚠️ J2Download API error: {data.get('message', 'Unknown error')}")
-                return None
-            
-            # Use Smart Parser
-            best_media = J2ResponseParser.parse(data, platform)
-            if best_media:
-                logger.info(f"✅ J2Download extraction successful!")
+                    data = response.json()
+                    logger.info(f"📥 J2Download response: {data}")
+                except Exception as e:
+                    logger.error(f"❌ Failed to parse JSON: {e}")
+                    logger.error(f"❌ Raw response: {response.text[:1000]}")
+                    return None
                 
-                # Check if it's a multi-media response (like TikTok photo slideshow)
-                medias = data.get("medias", [])
-                images = [m for m in medias if m.get("type") == "image"]
+                if "error" in data and data["error"]: 
+                    logger.warning(f"⚠️ J2Download API error: {data.get('message', 'Unknown error')}")
+                    return None
                 
-                if len(images) > 1:
-                    # Return full data for multi-image posts
-                    return {
-                        "url": best_media.get("url"),
-                        "ext": best_media.get("extension", "jpg"),
-                        "title": data.get("title", "video"),
-                        "medias": medias,  # Include all media items
-                        "type": "multi_image"
-                    }
+                # Use Smart Parser
+                best_media = J2ResponseParser.parse(data, platform)
+                if best_media:
+                    logger.info(f"✅ J2Download extraction successful!")
+                    
+                    # Check if it's a multi-media response (like TikTok photo slideshow)
+                    medias = data.get("medias", [])
+                    images = [m for m in medias if m.get("type") == "image"]
+                    
+                    if len(images) > 1:
+                        # Return full data for multi-image posts
+                        return {
+                            "url": best_media.get("url"),
+                            "ext": best_media.get("extension", "jpg"),
+                            "title": data.get("title", "video"),
+                            "medias": medias,  # Include all media items
+                            "type": "multi_image"
+                        }
+                    else:
+                        # Single media item
+                        return {
+                            "url": best_media.get("url"),
+                            "ext": best_media.get("extension", "mp4"),
+                            "title": data.get("title", "video")
+                        }
                 else:
-                    # Single media item
-                    return {
-                        "url": best_media.get("url"),
-                        "ext": best_media.get("extension", "mp4"),
-                        "title": data.get("title", "video")
-                    }
-            else:
-                logger.warning("⚠️ J2Download: No suitable media found in response")
-                return None
-            
+                    logger.warning("⚠️ J2Download: No suitable media found in response")
+                    return None
+                
         except Exception as e:
             logger.error(f"❌ J2 Failed: {e}")
             return None
 
-def download_to_server(url, filename):
-    """Downloads file from URL to server.
-    FIX: Removed generic headers to prevent 403 Forbidden on CDNs (like Twitter/X)
-    """
+async def download_to_server(url: str, filename: str) -> bool:
+    """Downloads file from URL to server - ASYNC VERSION with HTTPX"""
     try:
-        # Some CDNs reject requests with Referer set or specific UAs
-        # We start with a clean session and minimal headers
-        session = requests.Session()
         headers = {
             "User-Agent": EXACT_UA,
             "Accept": "*/*",
             "Connection": "keep-alive"
         }
         
-        with session.get(url, stream=True, headers=headers) as r:
-            r.raise_for_status()
-            with open(filename, 'wb') as f:
-                for chunk in r.iter_content(chunk_size=8192):
-                    f.write(chunk)
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            async with client.stream('GET', url, headers=headers) as response:
+                response.raise_for_status()
+                with open(filename, 'wb') as f:
+                    async for chunk in response.aiter_bytes(chunk_size=8192):
+                        f.write(chunk)
         return True
     except Exception as e:
         logger.error(f"❌ File Save Failed: {e}")
         return False
 
-@app.route("/", methods=["GET"])
-def index():
+@get("/")
+async def index() -> Dict[str, Any]:
     """API information and supported platforms"""
     supported_platforms = {
         "video_platforms": [
@@ -554,13 +577,17 @@ def index():
         ]
     }
     
-    return jsonify({
+    return {
         "status": "online",
-        "service": "Universal Media Downloader",
-        "version": "3.0.0",
+        "service": "Universal Media Downloader - ASYNC EDITION",
+        "version": "4.0.0",
+        "framework": "Litestar (ASGI)",
+        "performance": "High-Concurrency Async",
         "supported_platforms": supported_platforms,
         "total_platforms": sum(len(platforms) for platforms in supported_platforms.values()),
         "features": [
+            "Lightning-fast async processing",
+            "Handle thousands of concurrent downloads",
             "Download videos without watermarks (TikTok, etc.)",
             "Support for images, videos, and audio",
             "Multiple format support (.mp4, .mp3, .jpg, .png)",
@@ -569,267 +596,154 @@ def index():
             "Free service with no registration required"
         ],
         "extraction_methods": {
-            "primary": "J2Download API (Fast, 50+ sites)",
-            "secondary": "yt-dlp with platform optimization"
+            "primary": "J2Download API (Fast, 50+ sites) - ASYNC",
+            "architecture": "Modern async stack with uvloop"
         },
         "endpoints": {
             "download": "/download (POST)",
-            "files": "/files/<filename> (GET)",
-            "cookies": "/update_cookies (POST)",
-            "google_cookies": "/update_google_cookies (POST)",
-            "profile": "/upload_profile (POST)"
+            "files": "/files/<filename> (GET)"
         }
-    })
+    }
 
-@app.route("/download", methods=["POST"])
-def download_video():
-    logger.info("🚀 Download request received")
+@post("/download")
+async def download_video(data: DownloadRequest) -> DownloadResponse:
+    """
+    ASYNC High-Performance Download Endpoint
+    - Uses Pydantic for automatic validation
+    - HTTPX for non-blocking HTTP requests
+    - Handles thousands of concurrent requests
+    """
+    logger.info("🚀 Async download request received")
     
     try:
-        data = request.get_json()
-        raw_url = data.get("url")
-        if not raw_url: return jsonify({"error": "No URL"}), 400
-        
         uid = str(uuid.uuid4())
         final_filename = None
         
-        # 1. Clean & Expand URL
-        clean_text = clean_url_text(raw_url)
-        url = expand_short_url(clean_text)
+        # 1. Clean & Expand URL (ASYNC)
+        url = await expand_short_url(data.url)
         domain = urlparse(url).netloc.lower()
         platform = detect_platform(url)
         
         logger.info(f"✅ Processing [{platform}]: {url}")
         
-        # --- STRATEGY 1: J2 API ---
-        j2 = J2Extractor()
-        j2_result = j2.extract_download_url(url)
+        # --- J2 API EXTRACTION (ASYNC) ---
+        j2 = AsyncJ2Extractor()
+        j2_result = await j2.extract_download_url(url)
         
-        if j2_result:
-            logger.info("✅ J2 Success. Downloading...")
+        if not j2_result:
+            raise HTTPException(status_code=400, detail="J2Download extraction failed")
+        
+        logger.info("✅ J2 Success. Downloading...")
+        
+        # Check if it's a multi-image post (like TikTok photo slideshow)
+        if isinstance(j2_result, dict) and "medias" in j2_result:
+            medias = j2_result["medias"]
+            images = [m for m in medias if m.get("type") == "image"]
             
-            # Check if it's a multi-image post (like TikTok photo slideshow)
-            if isinstance(j2_result, dict) and "medias" in j2_result:
-                medias = j2_result["medias"]
-                images = [m for m in medias if m.get("type") == "image"]
+            if len(images) > 1:
+                logger.info(f"📸 Multi-image post detected: {len(images)} images")
                 
-                if len(images) > 1:
-                    logger.info(f"📸 Multi-image post detected: {len(images)} images")
-                    
-                    # Download all images
-                    downloaded_files = []
-                    for i, image in enumerate(images):
-                        ext = image.get("extension", "jpg")
-                        filename = f"{uid}_image_{i+1}.{ext}"
-                        filepath = os.path.join(DOWNLOAD_DIR, filename)
-                        
-                        if download_to_server(image["url"], filepath):
-                            downloaded_files.append(filename)
-                            logger.info(f"✅ Downloaded image {i+1}/{len(images)}: {filename}")
-                        else:
-                            logger.warning(f"⚠️ Failed to download image {i+1}")
-                    
-                    if downloaded_files:
-                        # Return info about all downloaded files
-                        base_url = request.host_url.rstrip("/").replace("http://", "https://")
-                        
-                        return jsonify({
-                            "status": "success",
-                            "message": f"Downloaded {len(downloaded_files)} images from photo slideshow",
-                            "type": "multi_image",
-                            "total_images": len(downloaded_files),
-                            "files": [
-                                {
-                                    "filename": filename,
-                                    "download_url": f"{base_url}/files/{filename}",
-                                    "type": "image"
-                                } for filename in downloaded_files
-                            ],
-                            "title": j2_result.get("title", "TikTok Photo Post"),
-                            "platform": platform
-                        })
-                    else:
-                        logger.warning("⚠️ J2 extraction successful but all image downloads failed. Falling back...")
-                else:
-                    # Single image - use original logic
-                    ext = j2_result.get("ext", "jpg")
-                    filename = f"{uid}.{ext}"
+                # Download all images concurrently using asyncio.gather
+                download_tasks = []
+                filenames = []
+                
+                for i, image in enumerate(images):
+                    ext = image.get("extension", "jpg")
+                    filename = f"{uid}_image_{i+1}.{ext}"
                     filepath = os.path.join(DOWNLOAD_DIR, filename)
+                    filenames.append(filename)
                     
-                    if download_to_server(j2_result["url"], filepath):
-                        final_filename = filename
+                    # Create async download task
+                    download_tasks.append(download_to_server(image["url"], filepath))
+                
+                # Execute all downloads concurrently
+                results = await asyncio.gather(*download_tasks, return_exceptions=True)
+                
+                # Check results
+                downloaded_files = []
+                for i, (result, filename) in enumerate(zip(results, filenames)):
+                    if result is True:
+                        downloaded_files.append(filename)
+                        logger.info(f"✅ Downloaded image {i+1}/{len(images)}: {filename}")
                     else:
-                        logger.warning("⚠️ J2 link valid, but download failed. Falling back...")
+                        logger.warning(f"⚠️ Failed to download image {i+1}: {result}")
+                
+                if downloaded_files:
+                    # Return info about all downloaded files
+                    return DownloadResponse(
+                        status="success",
+                        message=f"Downloaded {len(downloaded_files)} images from photo slideshow",
+                        type="multi_image",
+                        total_images=len(downloaded_files),
+                        files=[
+                            {
+                                "filename": filename,
+                                "download_url": f"/files/{filename}",
+                                "type": "image"
+                            } for filename in downloaded_files
+                        ],
+                        title=j2_result.get("title", "TikTok Photo Post"),
+                        platform=platform
+                    )
+                else:
+                    raise HTTPException(status_code=500, detail="All image downloads failed")
             else:
-                # Single media item - use original logic
-                ext = j2_result.get("ext", "mp4")
+                # Single image - use original logic
+                ext = j2_result.get("ext", "jpg")
                 filename = f"{uid}.{ext}"
                 filepath = os.path.join(DOWNLOAD_DIR, filename)
                 
-                if download_to_server(j2_result["url"], filepath):
+                if await download_to_server(j2_result["url"], filepath):
                     final_filename = filename
                 else:
-                    logger.warning("⚠️ J2 link valid, but download failed. Falling back...")
+                    raise HTTPException(status_code=500, detail="Download failed")
         else:
-            logger.warning("⚠️ J2Extractor failed, trying backup methods...")
-        
-        # --- STRATEGY 2: LOCAL BACKUP ---
-        if not final_filename:
-            logger.info("🔄 Triggering Local Backup...")
+            # Single media item - use original logic
+            ext = j2_result.get("ext", "mp4")
+            filename = f"{uid}.{ext}"
+            filepath = os.path.join(DOWNLOAD_DIR, filename)
             
-            ydl_opts = {
-                "outtmpl": os.path.join(DOWNLOAD_DIR, f"{uid}.%(ext)s"),
-                "user_agent": EXACT_UA,
-                "format": "bestvideo+bestaudio/best",
-                "merge_output_format": "mp4",
-                "quiet": False
-            }
-            
-            if platform == "youtube":
-                deno_path = shutil.which("deno") or "/opt/render/.deno/bin/deno"
-                if not os.path.exists(deno_path): deno_path = "/root/.deno/bin/deno"
-                
-                ydl_opts.update({
-                    "format": "bestvideo[vcodec^=avc1][height<=1080]+bestaudio[ext=m4a]/best",
-                    "js_engine": "deno",
-                    "js_runtimes": [deno_path],
-                    "extractor_args": {
-                        "youtube": {
-                            "player_client": ["ios", "web"]
-                        }
-                    }
-                })
-                
-                if os.path.exists(GOOGLE_COOKIES_FILE):
-                    ydl_opts["cookiefile"] = GOOGLE_COOKIES_FILE
-            
-            # Platform-specific optimizations
-            elif platform in ["tiktok", "douyin"]:
-                ydl_opts.update({
-                    "format": "best[ext=mp4]/best",
-                    "extractor_args": {
-                        "tiktok": {
-                            "api_hostname": "api16-normal-c-useast1a.tiktokv.com"
-                        }
-                    }
-                })
-            
-            elif platform in ["facebook", "instagram", "threads"]:
-                ydl_opts.update({
-                    "format": "best[height<=1080]/best"
-                })
-            
-            elif platform in ["twitter", "bluesky"]:
-                ydl_opts.update({
-                    "format": "best[ext=mp4]/best"
-                })
-            
-            elif platform in ["bilibili", "kuaishou", "weibo"]:
-                ydl_opts.update({
-                    "format": "best[ext=mp4]/best",
-                    "geo_bypass": True
-                })
-            
-            elif platform in ["soundcloud", "mixcloud", "spotify", "deezer"]:
-                ydl_opts.update({
-                    "format": "bestaudio/best",
-                    "extract_flat": False
-                })
-            
-            # Apply cookies based on platform
-            if platform in ["youtube", "google"] and os.path.exists(GOOGLE_COOKIES_FILE):
-                ydl_opts["cookiefile"] = GOOGLE_COOKIES_FILE
-            elif os.path.exists(SOCIAL_COOKIES_FILE):
-                ydl_opts["cookiefile"] = SOCIAL_COOKIES_FILE
-            
-            try:
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    info = ydl.extract_info(url, download=True)
-                    final_filename = os.path.basename(ydl.prepare_filename(info))
-            except Exception as e:
-                logger.error(f"❌ yt-dlp failed: {e}")
-                # No more fallback strategies available
+            if await download_to_server(j2_result["url"], filepath):
+                final_filename = filename
+            else:
+                raise HTTPException(status_code=500, detail="Download failed")
         
         if not final_filename:
-            return jsonify({"error": "All extraction methods failed"}), 500
+            raise HTTPException(status_code=500, detail="Download processing failed")
         
-        base_url = request.host_url.rstrip("/").replace("http://", "https://")
+        return DownloadResponse(
+            status="success",
+            download_url=f"/files/{final_filename}",
+            filename=final_filename
+        )
         
-        return jsonify({
-            "status": "success",
-            "download_url": f"{base_url}/files/{final_filename}",
-            "filename": final_filename
-        })
-        
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"❌ Final Error: {str(e)}")
-        return jsonify({"error": str(e)}), 500
+        raise HTTPException(status_code=500, detail=str(e))timizations
+@get("/files/{filename:str}")
+async def serve_file(filename: str) -> File:
+    """Serve downloaded files"""
+    file_path = os.path.join(DOWNLOAD_DIR, filename)
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="File not found")
+    return File(file_path, filename=filename)
 
-@app.route("/files/<filename>")
-def files(filename):
-    return send_from_directory(DOWNLOAD_DIR, filename, as_attachment=True)
-
-@app.route("/update_cookies", methods=["POST"])
-def update_social_cookies():
-    try:
-        file = request.files['file']
-        file.save(SOCIAL_COOKIES_FILE)
-        return jsonify({"status": "success"})
-    except: return jsonify({"error": "Failed"}), 500
-
-@app.route("/update_google_cookies", methods=["POST"])
-def update_google_cookies():
-    try:
-        file = request.files['file']
-        file.save(GOOGLE_COOKIES_FILE)
-        return jsonify({"status": "success"})
-    except: return jsonify({"error": "Failed"}), 500
-
-@app.route("/upload_profile", methods=["POST"])
-def upload_profile():
-    try:
-        file = request.files['file']
-        if os.path.exists(AUTH_PROFILE_DIR): shutil.rmtree(AUTH_PROFILE_DIR)
-        os.makedirs(AUTH_PROFILE_DIR)
-        
-        zip_path = os.path.join(AUTH_PROFILE_DIR, "profile.zip")
-        file.save(zip_path)
-        
-        import zipfile
-        with zipfile.ZipFile(zip_path, 'r') as z: z.extractall(AUTH_PROFILE_DIR)
-        
-        return jsonify({"status": "success"})
-    except: return jsonify({"error": "Failed"}), 500
-
-def find_available_port(start_port=5000, max_port=65535):
-    """Find an available port starting from start_port"""
-    import socket
-    
-    for port in range(start_port, max_port + 1):
-        try:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                s.bind(('', port))
-                logger.info(f"✅ Found available port: {port}")
-                return port
-        except OSError:
-            continue
-    
-    logger.error("❌ No available ports found")
-    return None
+# Create Litestar app
+app = Litestar(
+    route_handlers=[index, download_video, serve_file]
+)
 
 if __name__ == "__main__":
-    # Check for environment port first (for deployment platforms like Render, Heroku)
-    env_port = os.environ.get("PORT")
+    import uvicorn
     
-    if env_port:
-        port = int(env_port)
-        logger.info(f"🌍 Using environment port: {port}")
-    else:
-        # Find available port dynamically
-        port = find_available_port(5000, 10000)
-        if not port:
-            logger.error("❌ Could not find available port, using default 5000")
-            port = 5000
+    port = int(os.environ.get("PORT", 5000))
+    logger.info(f"🚀 Starting ASYNC Universal Media Downloader on port {port}")
     
-    logger.info(f"🚀 Starting Universal Media Downloader on port {port}")
-    app.run(host="0.0.0.0", port=port, threaded=True)
+    uvicorn.run(
+        "server:app",
+        host="0.0.0.0", 
+        port=port,
+        loop="uvloop"
+    )
