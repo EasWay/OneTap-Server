@@ -789,7 +789,7 @@ async def index() -> Dict[str, Any]:
         "service": "Universal Media Downloader - ASYNC EDITION",
         "version": "1.5",
         "latest_version": 5,  # Version code for comparison
-        "apk_url": "https://github.com/YourUsername/OneTap/releases/download/v1.5/OneTap_v1.5.apk",
+        "apk_url": "https://github.com/EasWay/OneTap-Releases/releases/download/v1.5/app-release.apk",
         "release_notes": "🚀 OneTap v1.5 Update\n\n✨ New Features:\n• Enhanced video download stability\n• Support for 50+ social media platforms\n•",
         "framework": "Litestar (ASGI)",
         "performance": "High-Concurrency Async",
