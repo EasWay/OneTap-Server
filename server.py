@@ -697,10 +697,10 @@ async def download_to_server(url: str, filename: str) -> bool:
 async def get_version() -> Dict[str, Any]:
     """Version endpoint for system updates"""
     return {
-        "version": "4.0.0",
-        "latest_version": 400,  # Version code for comparison
-        "apk_url": "https://github.com/YourUsername/OneTap/releases/download/v4.0.0/OneTap_v4.0.0.apk",
-        "release_notes": "🚀 Major Update v4.0.0\n\n✨ New Features:\n• Lightning-fast async processing\n• Support for 50+ platforms\n• Enhanced TikTok photo slideshow downloads\n• Improved error handling and retry logic\n\n🔧 Improvements:\n• Better network stability\n• Faster download speeds\n• Reduced memory usage\n• Enhanced UI responsiveness\n\n🐛 Bug Fixes:\n• Fixed duplicate detection issues\n• Resolved timeout problems on slow networks\n• Fixed crashes on certain device configurations",
+        "version": "1.5",
+        "latest_version": 5,  # Version code for comparison
+        "apk_url": "https://github.com/YourUsername/OneTap/releases/download/v1.5/OneTap_v1.5.apk",
+        "release_notes": "🚀 OneTap v1.5 Update\n\n✨ New Features:\n• Enhanced video download stability\n• Support for 50+ social media platforms\n• Improved TikTok photo slideshow downloads\n• Smart platform detection and format selection\n\n🔧 Improvements:\n• Faster async processing with uvloop\n• Better error handling and retry logic\n• Optimized network performance\n• Enhanced UI responsiveness\n\n🐛 Bug Fixes:\n• Fixed resource compilation issues\n• Resolved duplicate icon conflicts\n• Improved download reliability\n• Fixed crashes on certain URLs",
         "status": "online",
         "service": "Universal Media Downloader - ASYNC EDITION",
         "framework": "Litestar (ASGI)",
@@ -787,10 +787,10 @@ async def index() -> Dict[str, Any]:
     return {
         "status": "online",
         "service": "Universal Media Downloader - ASYNC EDITION",
-        "version": "4.0.0",
-        "latest_version": 400,  # Version code for comparison
-        "apk_url": "https://github.com/YourUsername/OneTap/releases/download/v4.0.0/OneTap_v4.0.0.apk",
-        "release_notes": "🚀 Major Update v4.0.0\n\n✨ New Features:\n• Lightning-fast async processing\n• Support for 50+ platforms\n• Enhanced TikTok photo slideshow downloads\n• Improved error handling and retry logic\n\n🔧 Improvements:\n• Better network stability\n• Faster download speeds\n• Reduced memory usage\n• Enhanced UI responsiveness\n\n🐛 Bug Fixes:\n• Fixed duplicate detection issues\n• Resolved timeout problems on slow networks\n• Fixed crashes on certain device configurations",
+        "version": "1.5",
+        "latest_version": 5,  # Version code for comparison
+        "apk_url": "https://github.com/YourUsername/OneTap/releases/download/v1.5/OneTap_v1.5.apk",
+        "release_notes": "🚀 OneTap v1.5 Update\n\n✨ New Features:\n• Enhanced video download stability\n• Support for 50+ social media platforms\n•",
         "framework": "Litestar (ASGI)",
         "performance": "High-Concurrency Async",
         "supported_platforms": supported_platforms,
