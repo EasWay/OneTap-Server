@@ -560,10 +560,10 @@ class AsyncJ2Extractor:
 async def get_version() -> Dict[str, Any]:
     """Version endpoint for system updates"""
     return {
-        "version": "1.6",
-        "latest_version": 6,  # Version code for comparison
-        "apk_url": "https://github.com/YourUsername/OneTap/releases/download/v1.6/OneTap_v1.6.apk",
-        "release_notes": "🚀 OneTap v1.6 - Lightning Fast Update\n\n✨ New Features:\n• Direct RapidAPI integration for YouTube (ultra-fast)\n• Optimized extraction strategy for maximum speed\n• Streamlined codebase for better performance\n• Enhanced stream proxy for all platforms\n\n🔧 Performance Improvements:\n• YouTube downloads now 3x faster with RapidAPI\n• Removed unnecessary complexity and redirects\n• Larger chunk sizes for faster streaming (64KB)\n• Optimized HTTP client settings\n• Reduced timeout values for quicker responses\n\n🐛 Bug Fixes:\n• Fixed ClassCastException in download history\n• Improved error handling and logging\n• Better memory management\n• Streamlined multi-image handling",
+        "version": "1.7",
+        "latest_version": 7,  # Version code for comparison
+        "apk_url": "https://github.com/YourUsername/OneTap/releases/download/v1.7/OneTap_v1.7.apk",
+        "release_notes": "🚀 OneTap v1.7 - Simplified & Optimized\n\n✨ New Features:\n• Unified J2Download extraction for all platforms\n• Fixed YouTube URL truncation issues\n• Improved URL processing and validation\n• Enhanced stream proxy for all platforms\n\n🔧 Performance Improvements:\n• Simplified extraction strategy (removed complexity)\n• Better YouTube parameter preservation\n• Smarter URL cleaning that preserves essential data\n• Optimized for reliability over speed\n\n🐛 Bug Fixes:\n• Fixed YouTube regular video URLs being truncated\n• Improved URL expansion and cleaning logic\n• Better error handling for malformed URLs\n• Enhanced compatibility with all YouTube URL formats",
         "status": "online",
         "service": "Universal Media Downloader - ASYNC EDITION",
         "framework": "Litestar (ASGI)",
@@ -571,8 +571,9 @@ async def get_version() -> Dict[str, Any]:
         "total_platforms": 50,
         "features": [
             "Lightning-fast async processing with uvloop",
-            "Direct RapidAPI integration for YouTube (3x faster)",
-            "Optimized stream proxy for all platforms",
+            "Unified J2Download extraction for all platforms",
+            "Smart URL processing that preserves essential parameters",
+            "Stream proxy for reliable downloads",
             "Handle thousands of concurrent downloads",
             "Download videos without watermarks (TikTok, etc.)",
             "Support for images, videos, and audio",
@@ -759,36 +760,51 @@ async def download_video(data: DownloadRequest) -> DownloadResponse:
                     platform=platform
                 )
         
-        # For single video/audio files - use stream proxy for all platforms
+        # For single video/audio files
         ext = extraction_result.get("ext", "mp4")
         source = extraction_result.get("source", "j2")
         title = extraction_result.get("title", "video")
         
-        # Store the direct URL and metadata for streaming
-        stream_id = uid
-        stream_data = {
-            "url": extraction_result["url"],
-            "ext": ext,
-            "title": title,
-            "platform": platform,
-            "source": source
-        }
+        # YouTube: Return direct URL for client-side download (avoids IP restrictions)
+        if platform == "youtube":
+            logger.info(f"✅ YouTube: Returning direct URL for client-side download (via {source})")
+            
+            return DownloadResponse(
+                status="success",
+                download_url=extraction_result["url"],  # Direct URL for YouTube
+                filename=f"{title}.{ext}",
+                message="Direct download URL ready",
+                title=title,
+                platform=platform
+            )
         
-        # Store stream data in memory (in production, use Redis or database)
-        if not hasattr(app.state, 'streams'):
-            app.state.streams = {}
-        app.state.streams[stream_id] = stream_data
-        
-        logger.info(f"✅ {platform}: Stream proxy ready for {stream_id} (via {source})")
-        
-        return DownloadResponse(
-            status="success",
-            download_url=f"/stream/{stream_id}",
-            filename=f"{title}.{ext}",
-            message="Stream proxy ready",
-            title=title,
-            platform=platform
-        )
+        # Other platforms: Use stream proxy approach
+        else:
+            # Store the direct URL and metadata for streaming
+            stream_id = uid
+            stream_data = {
+                "url": extraction_result["url"],
+                "ext": ext,
+                "title": title,
+                "platform": platform,
+                "source": source
+            }
+            
+            # Store stream data in memory (in production, use Redis or database)
+            if not hasattr(app.state, 'streams'):
+                app.state.streams = {}
+            app.state.streams[stream_id] = stream_data
+            
+            logger.info(f"✅ {platform}: Stream proxy ready for {stream_id} (via {source})")
+            
+            return DownloadResponse(
+                status="success",
+                download_url=f"/stream/{stream_id}",
+                filename=f"{title}.{ext}",
+                message="Stream proxy ready",
+                title=title,
+                platform=platform
+            )
         
     except HTTPException:
         raise
