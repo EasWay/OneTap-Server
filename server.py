@@ -752,8 +752,8 @@ async def download_video(data: DownloadRequest) -> DownloadResponse:
         logger.info(f"✅ Processing [{platform}]: {url}")
         
         # --- OPTIMIZED EXTRACTION STRATEGY ---
-        # YouTube: Direct to RapidAPI (fastest, most reliable)
-        # Other platforms: J2Download (optimized for social media)
+        # YouTube: Direct to RapidAPI -> return direct URL to client (avoids IP restrictions)
+        # Other platforms: J2Download -> use stream proxy (works better for social media)
         
         extraction_result = None
         
@@ -823,34 +823,51 @@ async def download_video(data: DownloadRequest) -> DownloadResponse:
                     platform=platform
                 )
         
-        # For single video/audio files, use stream proxy approach
+        # For single video/audio files
         ext = extraction_result.get("ext", "mp4")
         source = extraction_result.get("source", "j2")
+        title = extraction_result.get("title", "video")
         
-        # Store the direct URL and metadata for streaming
-        stream_id = uid
-        stream_data = {
-            "url": extraction_result["url"],
-            "ext": ext,
-            "title": extraction_result.get("title", "video"),
-            "platform": platform,
-            "source": source  # Track which extractor was used
-        }
+        # YouTube: Return direct URL for client-side download (avoids IP restrictions)
+        if platform == "youtube":
+            logger.info(f"✅ YouTube: Returning direct URL for client-side download (via {source})")
+            
+            return DownloadResponse(
+                status="success",
+                download_url=extraction_result["url"],  # Direct URL for YouTube
+                filename=f"{title}.{ext}",
+                message="Direct download URL ready",
+                title=title,
+                platform=platform
+            )
         
-        # Store stream data in memory (in production, use Redis or database)
-        if not hasattr(app.state, 'streams'):
-            app.state.streams = {}
-        app.state.streams[stream_id] = stream_data
-        
-        logger.info(f"✅ Stream proxy ready for {stream_id} (via {source})")
-        logger.info(f"🔗 Stream URL will be: /stream/{stream_id}")
-        
-        return DownloadResponse(
-            status="success",
-            download_url=f"/stream/{stream_id}",
-            filename=f"{extraction_result.get('title', 'video')}.{ext}",
-            message="Stream proxy ready"
-        )
+        # Other platforms: Use stream proxy approach
+        else:
+            # Store the direct URL and metadata for streaming
+            stream_id = uid
+            stream_data = {
+                "url": extraction_result["url"],
+                "ext": ext,
+                "title": title,
+                "platform": platform,
+                "source": source
+            }
+            
+            # Store stream data in memory (in production, use Redis or database)
+            if not hasattr(app.state, 'streams'):
+                app.state.streams = {}
+            app.state.streams[stream_id] = stream_data
+            
+            logger.info(f"✅ {platform}: Stream proxy ready for {stream_id} (via {source})")
+            
+            return DownloadResponse(
+                status="success",
+                download_url=f"/stream/{stream_id}",
+                filename=f"{title}.{ext}",
+                message="Stream proxy ready",
+                title=title,
+                platform=platform
+            )
         
     except HTTPException:
         raise
