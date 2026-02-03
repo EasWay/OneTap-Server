@@ -34,12 +34,6 @@ J2_BASE_URL = "https://j2download.com"
 J2_API_URL = f"{J2_BASE_URL}/api/autolink"
 J2_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36"
 
-# --- RAPIDAPI CONFIG ---
-RAPIDAPI_BASE_URL = "https://download-all-in-one-elite.p.rapidapi.com"
-RAPIDAPI_ENDPOINT = f"{RAPIDAPI_BASE_URL}/v1/social/autolink"
-RAPIDAPI_KEY = "8f0f4edac1msh350a101200e509dp1a75a4jsn682e8b456620"
-RAPIDAPI_HOST = "download-all-in-one-elite.p.rapidapi.com"
-
 # --- PYDANTIC MODELS ---
 class DownloadRequest(BaseModel):
     url: str
@@ -49,13 +43,18 @@ class DownloadRequest(BaseModel):
     def validate_url(cls, v):
         if not v or not v.strip():
             raise ValueError('URL cannot be empty')
-        # Clean URL text if needed
-        match = re.search(r'(https?://[^\s]+)', v)
-        if match:
-            return match.group(1)
+        
+        # Clean URL text if needed (extract URL from text)
+        url_match = re.search(r'(https?://[^\s]+)', v)
+        if url_match:
+            extracted_url = url_match.group(1)
+            # Don't be too aggressive with cleaning - preserve the full URL
+            return extracted_url
+        
         if not v.startswith(('http://', 'https://')):
             raise ValueError('URL must start with http:// or https://')
-        return v
+        
+        return v.strip()
 
 class DownloadResponse(BaseModel):
     status: str
@@ -69,11 +68,30 @@ class DownloadResponse(BaseModel):
     platform: Optional[str] = None
 
 def remove_query_params(url: str) -> str:
-    """Removes tracking parameters"""
+    """Removes tracking parameters but preserves essential YouTube parameters"""
     try:
-        if "?" in url: 
-            return url.split("?")[0]
-        return url
+        if "youtube.com" in url or "youtu.be" in url:
+            # For YouTube, preserve essential parameters like 'v', 'list', 't'
+            from urllib.parse import urlparse, parse_qs, urlencode
+            parsed = urlparse(url)
+            query_params = parse_qs(parsed.query)
+            
+            # Keep essential YouTube parameters
+            essential_params = {}
+            for key in ['v', 'list', 't', 'feature']:
+                if key in query_params:
+                    essential_params[key] = query_params[key]
+            
+            if essential_params:
+                new_query = urlencode(essential_params, doseq=True)
+                return f"{parsed.scheme}://{parsed.netloc}{parsed.path}?{new_query}"
+            else:
+                return f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+        else:
+            # For other platforms, remove query params as before
+            if "?" in url: 
+                return url.split("?")[0]
+            return url
     except: 
         return url
 
@@ -111,9 +129,17 @@ async def expand_short_url(url: str) -> str:
                     clean = remove_query_params(resolved)
                     logger.info(f"✅ Resolved to: {clean}")
                     return clean
+        else:
+            # For non-short URLs, still apply smart query param removal
+            clean = remove_query_params(url)
+            if clean != url:
+                logger.info(f"🧹 Cleaned URL: {url} -> {clean}")
+            return clean
     except Exception as e:
-        logger.warning(f"⚠️ URL Expansion failed: {e}")
-    return remove_query_params(url)
+        logger.warning(f"⚠️ URL processing failed: {e}")
+    
+    # Return original URL if processing fails
+    return url
 
 def clean_url_text(text: str) -> str:
     match = re.search(r'(https?://[^\s]+)', text)
@@ -379,80 +405,6 @@ class J2ResponseParser:
         
         return medias[0]
 
-class AsyncRapidApiExtractor:
-    async def extract_download_url(self, video_url: str) -> Optional[Dict[str, Any]]:
-        """
-        RapidAPI Extractor - Optimized for YouTube downloads
-        """
-        try:
-            platform = detect_platform(video_url)
-            logger.info(f"� RapidAPI extraction for {platform}")
-            
-            headers = {
-                "x-rapidapi-key": RAPIDAPI_KEY,
-                "x-rapidapi-host": RAPIDAPI_HOST,
-                "Content-Type": "application/json"
-            }
-            
-            payload = {"url": video_url}
-            
-            async with httpx.AsyncClient(timeout=20.0) as client:
-                resp = await client.post(RAPIDAPI_ENDPOINT, json=payload, headers=headers)
-                
-                if resp.status_code != 200:
-                    logger.error(f"❌ RapidAPI HTTP {resp.status_code}")
-                    return None
-                
-                data = resp.json()
-                
-                if data.get("status") != "success":
-                    logger.warning(f"⚠️ RapidAPI failed: {data.get('message', 'Unknown error')}")
-                    return None
-                
-                result = data.get("result", {})
-                if not result:
-                    return None
-                
-                # Extract best quality download URL
-                download_url = None
-                title = result.get("title", "video")
-                
-                if "video" in result:
-                    video_data = result["video"]
-                    if isinstance(video_data, list) and video_data:
-                        # Get highest quality
-                        best_video = max(video_data, key=lambda x: int(x.get("quality", "0").replace("p", "")))
-                        download_url = best_video.get("url")
-                    elif isinstance(video_data, dict):
-                        download_url = video_data.get("url")
-                    elif isinstance(video_data, str):
-                        download_url = video_data
-                
-                if not download_url:
-                    download_url = result.get("url") or result.get("download_url")
-                
-                if not download_url:
-                    return None
-                
-                # Determine extension
-                ext = "mp4"
-                if "audio" in result or platform in ["soundcloud", "spotify"]:
-                    ext = "mp3"
-                elif "image" in result:
-                    ext = "jpg"
-                
-                logger.info(f"✅ RapidAPI success!")
-                
-                return {
-                    "url": download_url,
-                    "ext": ext,
-                    "title": title,
-                    "source": "rapidapi"
-                }
-                    
-        except Exception as e:
-            logger.error(f"❌ RapidAPI failed: {e}")
-            return None
 
 class AsyncJ2Extractor:
     async def extract_download_url(self, video_url: str) -> Optional[Dict[str, Any]]:
@@ -751,30 +703,14 @@ async def download_video(data: DownloadRequest) -> DownloadResponse:
         
         logger.info(f"✅ Processing [{platform}]: {url}")
         
-        # --- OPTIMIZED EXTRACTION STRATEGY ---
-        # YouTube: Direct to RapidAPI -> return direct URL to client (avoids IP restrictions)
-        # Other platforms: J2Download -> use stream proxy (works better for social media)
+        # --- SIMPLIFIED EXTRACTION STRATEGY ---
+        # All platforms: J2Download (works for all social media + YouTube)
         
         extraction_result = None
         
-        if platform == "youtube":
-            logger.info("🎯 YouTube detected - using RapidAPI direct")
-            rapidapi = AsyncRapidApiExtractor()
-            extraction_result = await rapidapi.extract_download_url(url)
-            
-            if not extraction_result:
-                logger.info("🔄 RapidAPI failed, trying J2Download fallback")
-                j2 = AsyncJ2Extractor()
-                extraction_result = await j2.extract_download_url(url)
-        else:
-            logger.info(f"🎯 {platform} detected - using J2Download")
-            j2 = AsyncJ2Extractor()
-            extraction_result = await j2.extract_download_url(url)
-            
-            if not extraction_result:
-                logger.info("🔄 J2Download failed, trying RapidAPI fallback")
-                rapidapi = AsyncRapidApiExtractor()
-                extraction_result = await rapidapi.extract_download_url(url)
+        logger.info(f"🎯 {platform} detected - using J2Download")
+        j2 = AsyncJ2Extractor()
+        extraction_result = await j2.extract_download_url(url)
         
         if not extraction_result:
             raise HTTPException(status_code=400, detail="All extraction methods failed")
@@ -823,51 +759,36 @@ async def download_video(data: DownloadRequest) -> DownloadResponse:
                     platform=platform
                 )
         
-        # For single video/audio files
+        # For single video/audio files - use stream proxy for all platforms
         ext = extraction_result.get("ext", "mp4")
         source = extraction_result.get("source", "j2")
         title = extraction_result.get("title", "video")
         
-        # YouTube: Return direct URL for client-side download (avoids IP restrictions)
-        if platform == "youtube":
-            logger.info(f"✅ YouTube: Returning direct URL for client-side download (via {source})")
-            
-            return DownloadResponse(
-                status="success",
-                download_url=extraction_result["url"],  # Direct URL for YouTube
-                filename=f"{title}.{ext}",
-                message="Direct download URL ready",
-                title=title,
-                platform=platform
-            )
+        # Store the direct URL and metadata for streaming
+        stream_id = uid
+        stream_data = {
+            "url": extraction_result["url"],
+            "ext": ext,
+            "title": title,
+            "platform": platform,
+            "source": source
+        }
         
-        # Other platforms: Use stream proxy approach
-        else:
-            # Store the direct URL and metadata for streaming
-            stream_id = uid
-            stream_data = {
-                "url": extraction_result["url"],
-                "ext": ext,
-                "title": title,
-                "platform": platform,
-                "source": source
-            }
-            
-            # Store stream data in memory (in production, use Redis or database)
-            if not hasattr(app.state, 'streams'):
-                app.state.streams = {}
-            app.state.streams[stream_id] = stream_data
-            
-            logger.info(f"✅ {platform}: Stream proxy ready for {stream_id} (via {source})")
-            
-            return DownloadResponse(
-                status="success",
-                download_url=f"/stream/{stream_id}",
-                filename=f"{title}.{ext}",
-                message="Stream proxy ready",
-                title=title,
-                platform=platform
-            )
+        # Store stream data in memory (in production, use Redis or database)
+        if not hasattr(app.state, 'streams'):
+            app.state.streams = {}
+        app.state.streams[stream_id] = stream_data
+        
+        logger.info(f"✅ {platform}: Stream proxy ready for {stream_id} (via {source})")
+        
+        return DownloadResponse(
+            status="success",
+            download_url=f"/stream/{stream_id}",
+            filename=f"{title}.{ext}",
+            message="Stream proxy ready",
+            title=title,
+            platform=platform
+        )
         
     except HTTPException:
         raise
