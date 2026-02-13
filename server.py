@@ -830,6 +830,7 @@ async def stream_proxy(stream_id: str, state: State) -> Stream:
     This prevents 403 errors caused by signature validation failures.
     """
     from litestar.types import Receive, Scope, Send
+    from litestar.response import Response
     
     try:
         # Get stream data from global storage
@@ -847,100 +848,75 @@ async def stream_proxy(stream_id: str, state: State) -> Stream:
         logger.info(f"🌊 Starting stream proxy for {platform}: {stream_id} (via {source})")
         logger.info(f"📺 Video URL: {video_url[:100]}...")
         
-        # Try to get Content-Length from source before streaming
-        content_length = None
-        try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(10.0)) as client:
-                # Make HEAD request to get Content-Length
-                head_headers = {
-                    "User-Agent": EXACT_UA,
-                    "Accept": "*/*"
-                }
-                head_response = await client.head(video_url, headers=head_headers, follow_redirects=True)
-                if head_response.status_code == 200:
-                    content_length = head_response.headers.get("Content-Length")
-                    if content_length:
-                        logger.info(f"📏 Content-Length from source: {content_length} bytes ({int(content_length)/1024/1024:.2f} MB)")
-        except Exception as e:
-            logger.warning(f"⚠️ Could not fetch Content-Length: {e}")
+        # Determine headers based on source
+        if source == "rapidapi":
+            request_headers = {
+                "User-Agent": "OneTap-Server/4.0.0",
+                "Accept": "*/*",
+                "Connection": "keep-alive"
+            }
+        elif platform == "youtube":
+            request_headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36",
+                "Accept": "*/*",
+                "Referer": "https://www.youtube.com/",
+                "Connection": "keep-alive"
+            }
+        else:
+            request_headers = {
+                "User-Agent": EXACT_UA,
+                "Accept": "*/*",
+                "Connection": "keep-alive"
+            }
+        
+        # Create HTTP client
+        client = httpx.AsyncClient(
+            timeout=httpx.Timeout(120.0, connect=15.0),
+            follow_redirects=True,
+            limits=httpx.Limits(max_keepalive_connections=10, max_connections=20)
+        )
+        
+        # Start the GET request to get headers including Content-Length
+        logger.info(f"🚀 Initiating stream from {source}...")
+        response = await client.get(video_url, headers=request_headers)
+        
+        logger.info(f"� Response status: {response.status_code}")
+        
+        if response.status_code not in [200, 206]:
+            await client.aclose()
+            error_msg = f"HTTP {response.status_code}: {response.reason_phrase}"
+            logger.error(f"❌ {error_msg}")
+            raise HTTPException(status_code=response.status_code, detail=error_msg)
+        
+        # Extract Content-Length from response
+        content_length = response.headers.get("content-length")
+        if content_length:
+            logger.info(f"📏 Content-Length: {content_length} bytes ({int(content_length)/1024/1024:.2f} MB)")
+        else:
+            logger.warning(f"⚠️ No Content-Length header from source")
         
         async def stream_generator():
             """Generator that streams video data chunk by chunk"""
             try:
-                # Optimized headers based on source
-                if source == "rapidapi":
-                    headers = {
-                        "User-Agent": "OneTap-Server/4.0.0",
-                        "Accept": "*/*",
-                        "Connection": "keep-alive"
-                    }
-                    use_redirects = True
-                elif platform == "youtube":
-                    headers = {
-                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36",
-                        "Accept": "*/*",
-                        "Referer": "https://www.youtube.com/",
-                        "Connection": "keep-alive"
-                    }
-                    use_redirects = True
-                else:
-                    headers = {
-                        "User-Agent": EXACT_UA,
-                        "Accept": "*/*",
-                        "Connection": "keep-alive"
-                    }
-                    use_redirects = True
+                logger.info(f"✅ Streaming content...")
                 
-                # Optimized HTTP client settings
-                async with httpx.AsyncClient(
-                    timeout=httpx.Timeout(120.0, connect=15.0),
-                    follow_redirects=use_redirects,
-                    limits=httpx.Limits(max_keepalive_connections=10, max_connections=20)
-                ) as client:
-                    
-                    logger.info(f"🚀 Streaming from {source}...")
-                    logger.info(f"🔗 Request URL: {video_url[:200]}...")
-                    logger.info(f"📋 Headers: {headers}")
-                    
-                    # Direct streaming - no complex redirect handling
-                    response = await client.get(video_url, headers=headers)
-                    
-                    logger.info(f"📡 Response status: {response.status_code}")
-                    logger.info(f"📋 Response headers: {dict(response.headers)}")
-                    
-                    if response.status_code not in [200, 206]:
-                        error_msg = f"HTTP {response.status_code}: {response.reason_phrase}"
-                        logger.error(f"❌ {error_msg}")
-                        logger.error(f"❌ Response body: {response.text[:500]}")
-                        raise HTTPException(status_code=response.status_code, detail=error_msg)
-                    
-                    logger.info(f"✅ Connected! Streaming content...")
-                    
-                    # High-performance streaming with larger chunks
-                    total_bytes = 0
-                    async for chunk in response.aiter_bytes(chunk_size=65536):  # 64KB chunks for speed
-                        if chunk:
-                            total_bytes += len(chunk)
-                            yield chunk
-                    
-                    logger.info(f"✅ Stream complete: {total_bytes:,} bytes")
-                    
-                    # Clean up stream data from global storage
-                    if stream_id in streams_storage:
-                        del streams_storage[stream_id]
-                        
-            except HTTPException:
-                # Re-raise HTTP exceptions
-                raise
+                # Stream the response we already started
+                total_bytes = 0
+                async for chunk in response.aiter_bytes(chunk_size=65536):  # 64KB chunks
+                    if chunk:
+                        total_bytes += len(chunk)
+                        yield chunk
+                
+                logger.info(f"✅ Stream complete: {total_bytes:,} bytes")
+                
             except Exception as e:
                 logger.error(f"❌ Stream generator error: {e}")
-                logger.error(f"❌ Error type: {type(e).__name__}")
-                import traceback
-                logger.error(f"❌ Traceback: {traceback.format_exc()}")
-                # Clean up on error from global storage
+                raise
+            finally:
+                # Clean up
+                await client.aclose()
                 if stream_id in streams_storage:
                     del streams_storage[stream_id]
-                raise
         
         # Determine content type based on extension
         content_type_map = {
@@ -955,19 +931,15 @@ async def stream_proxy(stream_id: str, state: State) -> Stream:
         content_type = content_type_map.get(ext.lower(), "application/octet-stream")
         
         # Create safe filename - handle Unicode and special characters properly
-        # First replace all whitespace (including newlines, tabs) with single space
         safe_title = re.sub(r'\s+', ' ', title)
-        # Convert to ASCII, removing non-ASCII characters
         safe_title = safe_title.encode('ascii', 'ignore').decode('ascii')
-        # Remove any remaining non-alphanumeric characters except spaces and hyphens
         safe_title = re.sub(r'[^\w\s-]', '', safe_title).strip()[:50]
-        # If title is empty after sanitization, use default
         if not safe_title:
             safe_title = f"media_{stream_id[:8]}"
         
         filename = f"{safe_title}.{ext}"
         
-        # URL encode the filename for the header to handle any edge cases
+        # URL encode the filename
         from urllib.parse import quote
         encoded_filename = quote(filename)
         
@@ -976,14 +948,13 @@ async def stream_proxy(stream_id: str, state: State) -> Stream:
         # Build response headers
         response_headers = {
             "Content-Disposition": f"attachment; filename*=UTF-8''{encoded_filename}",
-            "Cache-Control": "no-cache",
-            "Accept-Ranges": "bytes"
+            "Cache-Control": "no-cache"
         }
         
-        # Add Content-Length if we got it from the source
+        # Add Content-Length if available
         if content_length:
             response_headers["Content-Length"] = content_length
-            logger.info(f"✅ Including Content-Length header: {content_length} bytes")
+            logger.info(f"✅ Including Content-Length: {content_length} bytes")
         
         return Stream(
             stream_generator(),
