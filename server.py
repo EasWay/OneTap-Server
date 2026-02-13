@@ -847,6 +847,23 @@ async def stream_proxy(stream_id: str, state: State) -> Stream:
         logger.info(f"🌊 Starting stream proxy for {platform}: {stream_id} (via {source})")
         logger.info(f"📺 Video URL: {video_url[:100]}...")
         
+        # Try to get Content-Length from source before streaming
+        content_length = None
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(10.0)) as client:
+                # Make HEAD request to get Content-Length
+                head_headers = {
+                    "User-Agent": EXACT_UA,
+                    "Accept": "*/*"
+                }
+                head_response = await client.head(video_url, headers=head_headers, follow_redirects=True)
+                if head_response.status_code == 200:
+                    content_length = head_response.headers.get("Content-Length")
+                    if content_length:
+                        logger.info(f"📏 Content-Length from source: {content_length} bytes ({int(content_length)/1024/1024:.2f} MB)")
+        except Exception as e:
+            logger.warning(f"⚠️ Could not fetch Content-Length: {e}")
+        
         async def stream_generator():
             """Generator that streams video data chunk by chunk"""
             try:
@@ -945,18 +962,33 @@ async def stream_proxy(stream_id: str, state: State) -> Stream:
         # Remove any remaining non-alphanumeric characters except spaces and hyphens
         safe_title = re.sub(r'[^\w\s-]', '', safe_title).strip()[:50]
         # If title is empty after sanitization, use default
-        filename = f"{safe_title}.{ext}" if safe_title else f"media_{stream_id[:8]}.{ext}"
+        if not safe_title:
+            safe_title = f"media_{stream_id[:8]}"
+        
+        filename = f"{safe_title}.{ext}"
+        
+        # URL encode the filename for the header to handle any edge cases
+        from urllib.parse import quote
+        encoded_filename = quote(filename)
         
         logger.info(f"🎬 Returning stream response: {filename} ({content_type})")
+        
+        # Build response headers
+        response_headers = {
+            "Content-Disposition": f"attachment; filename*=UTF-8''{encoded_filename}",
+            "Cache-Control": "no-cache",
+            "Accept-Ranges": "bytes"
+        }
+        
+        # Add Content-Length if we got it from the source
+        if content_length:
+            response_headers["Content-Length"] = content_length
+            logger.info(f"✅ Including Content-Length header: {content_length} bytes")
         
         return Stream(
             stream_generator(),
             media_type=content_type,
-            headers={
-                "Content-Disposition": f'attachment; filename="{filename}"',
-                "Cache-Control": "no-cache",
-                "Accept-Ranges": "bytes"
-            }
+            headers=response_headers
         )
         
     except HTTPException:
