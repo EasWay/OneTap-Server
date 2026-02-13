@@ -537,16 +537,23 @@ class AsyncJ2Extractor:
                         return {
                             "url": best_media.get("url"),
                             "ext": best_media.get("extension", "jpg"),
-                            "title": data.get("title", "video"),
+                            "title": data.get("title") or data.get("author", "") or f"{platform}_post",
                             "medias": medias,  # Include all media items
                             "type": "multi_image"
                         }
                     else:
-                        # Single media item
+                        # Single media item - better title fallback
+                        title = (
+                            data.get("title") or 
+                            data.get("author", "") or 
+                            f"{platform}_{data.get('id', '')}" or
+                            f"{platform}_video"
+                        )
+                        
                         return {
                             "url": best_media.get("url"),
                             "ext": best_media.get("extension", "mp4"),
-                            "title": data.get("title", "video")
+                            "title": title
                         }
                 else:
                     logger.warning("⚠️ J2Download: No suitable media found in response")
