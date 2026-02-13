@@ -684,8 +684,13 @@ async def index() -> Dict[str, Any]:
         }
     }
 
+from litestar.datastructures import State
+
+# Global streams storage (in production, use Redis or database)
+streams_storage: Dict[str, Dict[str, Any]] = {}
+
 @post("/download")
-async def download_video(data: DownloadRequest) -> DownloadResponse:
+async def download_video(data: DownloadRequest, state: State) -> DownloadResponse:
     """
     ASYNC High-Performance Download Endpoint with Stream Proxy
     - Uses Pydantic for automatic validation
@@ -732,11 +737,8 @@ async def download_video(data: DownloadRequest) -> DownloadResponse:
                     ext = image.get("extension", "jpg")
                     image_stream_id = f"{uid}_image_{i+1}"
                     
-                    # Store each image stream
-                    if not hasattr(app.state, 'streams'):
-                        app.state.streams = {}
-                    
-                    app.state.streams[image_stream_id] = {
+                    # Store each image stream in global storage
+                    streams_storage[image_stream_id] = {
                         "url": image["url"],
                         "ext": ext,
                         "title": f"image_{i+1}",
@@ -790,10 +792,8 @@ async def download_video(data: DownloadRequest) -> DownloadResponse:
                 "source": source
             }
             
-            # Store stream data in memory (in production, use Redis or database)
-            if not hasattr(app.state, 'streams'):
-                app.state.streams = {}
-            app.state.streams[stream_id] = stream_data
+            # Store stream data in global storage
+            streams_storage[stream_id] = stream_data
             
             logger.info(f"✅ {platform}: Stream proxy ready for {stream_id} (via {source})")
             
@@ -821,7 +821,7 @@ async def serve_file(filename: str) -> File:
     return File(file_path, filename=filename)
 
 @get("/stream/{stream_id:str}")
-async def stream_proxy(stream_id: str) -> Stream:
+async def stream_proxy(stream_id: str, state: State) -> Stream:
     """
     Stream Proxy Endpoint - The Cobalt Way
     
@@ -832,16 +832,12 @@ async def stream_proxy(stream_id: str) -> Stream:
     from litestar.types import Receive, Scope, Send
     
     try:
-        # Get stream data
-        if not hasattr(app.state, 'streams'):
-            logger.error(f"❌ App state has no streams attribute")
-            raise HTTPException(status_code=500, detail="Server state not initialized")
-            
-        if stream_id not in app.state.streams:
-            logger.error(f"❌ Stream {stream_id} not found in {list(app.state.streams.keys())}")
+        # Get stream data from global storage
+        if stream_id not in streams_storage:
+            logger.error(f"❌ Stream {stream_id} not found in {list(streams_storage.keys())}")
             raise HTTPException(status_code=404, detail="Stream not found")
         
-        stream_data = app.state.streams[stream_id]
+        stream_data = streams_storage[stream_id]
         video_url = stream_data["url"]
         ext = stream_data["ext"]
         title = stream_data["title"]
@@ -886,13 +882,20 @@ async def stream_proxy(stream_id: str) -> Stream:
                 ) as client:
                     
                     logger.info(f"🚀 Streaming from {source}...")
+                    logger.info(f"🔗 Request URL: {video_url[:200]}...")
+                    logger.info(f"📋 Headers: {headers}")
                     
                     # Direct streaming - no complex redirect handling
                     response = await client.get(video_url, headers=headers)
                     
+                    logger.info(f"📡 Response status: {response.status_code}")
+                    logger.info(f"📋 Response headers: {dict(response.headers)}")
+                    
                     if response.status_code not in [200, 206]:
-                        logger.error(f"❌ HTTP {response.status_code}: {response.reason_phrase}")
-                        return
+                        error_msg = f"HTTP {response.status_code}: {response.reason_phrase}"
+                        logger.error(f"❌ {error_msg}")
+                        logger.error(f"❌ Response body: {response.text[:500]}")
+                        raise HTTPException(status_code=response.status_code, detail=error_msg)
                     
                     logger.info(f"✅ Connected! Streaming content...")
                     
@@ -905,19 +908,22 @@ async def stream_proxy(stream_id: str) -> Stream:
                     
                     logger.info(f"✅ Stream complete: {total_bytes:,} bytes")
                     
-                    # Clean up stream data
-                    if hasattr(app.state, 'streams') and stream_id in app.state.streams:
-                        del app.state.streams[stream_id]
+                    # Clean up stream data from global storage
+                    if stream_id in streams_storage:
+                        del streams_storage[stream_id]
                         
+            except HTTPException:
+                # Re-raise HTTP exceptions
+                raise
             except Exception as e:
                 logger.error(f"❌ Stream generator error: {e}")
                 logger.error(f"❌ Error type: {type(e).__name__}")
                 import traceback
                 logger.error(f"❌ Traceback: {traceback.format_exc()}")
-                # Clean up on error
-                if hasattr(app.state, 'streams') and stream_id in app.state.streams:
-                    del app.state.streams[stream_id]
-                return
+                # Clean up on error from global storage
+                if stream_id in streams_storage:
+                    del streams_storage[stream_id]
+                raise
         
         # Determine content type based on extension
         content_type_map = {
