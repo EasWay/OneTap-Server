@@ -937,8 +937,11 @@ async def stream_proxy(stream_id: str, state: State) -> Stream:
         }
         content_type = content_type_map.get(ext.lower(), "application/octet-stream")
         
-        # Create safe filename
-        safe_title = re.sub(r'[^\w\s-]', '', title).strip()[:50]
+        # Create safe filename - remove ALL control characters and newlines
+        # First replace all whitespace (including newlines, tabs) with single space
+        safe_title = re.sub(r'\s+', ' ', title)
+        # Then remove any remaining non-alphanumeric characters except spaces and hyphens
+        safe_title = re.sub(r'[^\w\s-]', '', safe_title).strip()[:50]
         filename = f"{safe_title}.{ext}" if safe_title else f"video.{ext}"
         
         logger.info(f"🎬 Returning stream response: {filename} ({content_type})")
