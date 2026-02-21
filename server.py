@@ -4,6 +4,7 @@ import logging
 import re
 import asyncio
 import uvloop
+import ipaddress
 from typing import Dict, List, Optional, Any
 from urllib.parse import urlparse
 
@@ -18,6 +19,104 @@ import httpx
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+# Security: Allowed domains for SSRF prevention
+ALLOWED_DOMAINS = [
+    'youtube.com', 'youtu.be', 'm.youtube.com', 'youtube-nocookie.com',
+    'tiktok.com', 'vm.tiktok.com', 'vt.tiktok.com', 'douyin.com', 'capcut.com',
+    'facebook.com', 'fb.watch', 'fb.com', 'm.facebook.com',
+    'instagram.com', 'instagr.am', 'ig.me', 'threads.net',
+    'twitter.com', 'x.com', 't.co', 'mobile.twitter.com',
+    'vimeo.com', 'dailymotion.com', 'bilibili.com', 'b23.tv',
+    'rumble.com', 'streamable.com', 'ted.com', 'sohu.com', 'tv.sohu.com', 'bitchute.com',
+    'kuaishou.com', 'kwai.com', 'xiaohongshu.com', 'xhslink.com',
+    'ixigua.com', 'weibo.com', 'weibo.cn', 'miaopai.com', 'meipai.com',
+    'xiaoying.tv', 'yingke.com', 'sina.com', 'qq.com',
+    'reddit.com', 'redd.it', 'snapchat.com', 'pinterest.com', 'pin.it',
+    'tumblr.com', 'linkedin.com', 'lnkd.in', 'telegram.org', 't.me',
+    'bsky.app', 'bluesky.social', 'sharechat.com', 'likee.video', 'like.video',
+    'hipi.co.in', 'imdb.com', 'imgur.com', 'ifunny.co', 'izlesene.com',
+    'espn.com', '9gag.com', 'ok.ru', 'oke.ru', 'febspot.com', 'getstickerpack.com',
+    'soundcloud.com', 'snd.sc', 'mixcloud.com', 'spotify.com', 'spoti.fi',
+    'deezer.com', 'zingmp3.vn', 'bandcamp.com', 'castbox.fm', 'mediafire.com',
+    'pornbox.com', 'xvideos.com', 'xnxx.com',
+    # J2Download domain
+    'j2download.com'
+]
+
+# Security: Blocked hosts and ports for SSRF prevention
+BLOCKED_HOSTS = [
+    'localhost', '127.0.0.1', '0.0.0.0', '::1',
+    '169.254.169.254',  # AWS metadata
+    '169.254.170.2',    # ECS metadata
+    'metadata.google.internal',  # GCP metadata
+    '100.100.100.200',  # Alibaba Cloud metadata
+]
+
+BLOCKED_PORTS = [22, 23, 25, 3306, 5432, 6379, 27017, 11211, 9200]  # SSH, Telnet, SMTP, MySQL, PostgreSQL, Redis, MongoDB, Memcached, Elasticsearch
+
+def validate_url_security(url: str) -> bool:
+    """
+    Validate URL to prevent SSRF attacks
+    Returns True if URL is safe, False otherwise
+    """
+    try:
+        parsed = urlparse(url)
+        
+        # Check if scheme is allowed
+        if parsed.scheme not in ['http', 'https']:
+            logger.warning(f"🚫 Blocked URL with invalid scheme: {parsed.scheme}")
+            return False
+        
+        # Check if domain is in allowed list
+        hostname = parsed.hostname
+        if not hostname:
+            logger.warning(f"🚫 Blocked URL with no hostname")
+            return False
+        
+        # Check against allowed domains
+        is_allowed = any(
+            hostname == domain or hostname.endswith('.' + domain)
+            for domain in ALLOWED_DOMAINS
+        )
+        
+        if not is_allowed:
+            logger.warning(f"🚫 Blocked URL with unauthorized domain: {hostname}")
+            return False
+        
+        # Check if hostname resolves to blocked IP
+        try:
+            # Resolve hostname to IP
+            import socket
+            ip = socket.gethostbyname(hostname)
+            ip_obj = ipaddress.ip_address(ip)
+            
+            # Block private/internal IPs
+            if ip_obj.is_private or ip_obj.is_loopback or ip_obj.is_link_local:
+                logger.warning(f"🚫 Blocked URL resolving to private IP: {ip}")
+                return False
+            
+            # Block specific IPs
+            if ip in BLOCKED_HOSTS:
+                logger.warning(f"🚫 Blocked URL resolving to blocked IP: {ip}")
+                return False
+                
+        except socket.gaierror:
+            logger.warning(f"🚫 Could not resolve hostname: {hostname}")
+            return False
+        
+        # Check if port is blocked
+        port = parsed.port
+        if port and port in BLOCKED_PORTS:
+            logger.warning(f"🚫 Blocked URL with forbidden port: {port}")
+            return False
+        
+        logger.info(f"✅ URL passed security validation: {hostname}")
+        return True
+        
+    except Exception as e:
+        logger.error(f"❌ Error validating URL: {e}")
+        return False
 
 # Set uvloop as the event loop policy for maximum performance
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
@@ -96,8 +195,13 @@ def remove_query_params(url: str) -> str:
         return url
 
 async def expand_short_url(url: str) -> str:
-    """Resolves short URLs for all supported platforms - ASYNC VERSION"""
+    """Resolves short URLs for all supported platforms - ASYNC VERSION with SSRF protection"""
     try:
+        # Security: Validate URL before processing
+        if not validate_url_security(url):
+            logger.warning(f"🚫 URL failed security validation: {url}")
+            return url  # Return original if validation fails
+        
         short_domains = [
             # TikTok & Related
             'vt.tiktok.com', 'vm.tiktok.com', 'tiktok.com/t/',
@@ -116,15 +220,43 @@ async def expand_short_url(url: str) -> str:
             logger.info(f"🔗 Expanding short URL: {url}")
             headers = {"User-Agent": J2_UA}
             
-            async with httpx.AsyncClient(timeout=10.0) as client:
+            async with httpx.AsyncClient(timeout=10.0, follow_redirects=False) as client:
                 try:
-                    resp = await client.head(url, headers=headers, follow_redirects=True)
-                    if resp.status_code >= 400:
-                        raise Exception("Head failed")
+                    # Follow redirects manually with validation
+                    current_url = url
+                    max_redirects = 5
+                    redirect_count = 0
+                    
+                    while redirect_count < max_redirects:
+                        resp = await client.head(current_url, headers=headers)
+                        
+                        if resp.status_code in [301, 302, 303, 307, 308]:
+                            redirect_url = resp.headers.get('location')
+                            if not redirect_url:
+                                break
+                            
+                            # Security: Validate redirect URL
+                            if not validate_url_security(redirect_url):
+                                logger.warning(f"🚫 Blocked redirect to unsafe URL: {redirect_url}")
+                                return url
+                            
+                            current_url = redirect_url
+                            redirect_count += 1
+                        else:
+                            break
+                    
+                    resolved = current_url
+                    
                 except:
-                    resp = await client.get(url, headers=headers, follow_redirects=True)
+                    # Fallback to GET if HEAD fails
+                    resp = await client.get(url, headers=headers, follow_redirects=False)
+                    resolved = str(resp.url)
+                    
+                    # Security: Validate final URL
+                    if not validate_url_security(resolved):
+                        logger.warning(f"🚫 Resolved URL failed validation: {resolved}")
+                        return url
                 
-                resolved = str(resp.url)
                 if "login" not in resolved and "error" not in resolved:
                     clean = remove_query_params(resolved)
                     logger.info(f"✅ Resolved to: {clean}")
@@ -692,9 +824,11 @@ async def index() -> Dict[str, Any]:
     }
 
 from litestar.datastructures import State
+from threading import Lock
 
-# Global streams storage (in production, use Redis or database)
+# Security: Thread-safe global streams storage with lock
 streams_storage: Dict[str, Dict[str, Any]] = {}
+storage_lock = Lock()
 
 @post("/download")
 async def download_video(data: DownloadRequest, state: State) -> DownloadResponse:
@@ -799,8 +933,9 @@ async def download_video(data: DownloadRequest, state: State) -> DownloadRespons
                 "source": source
             }
             
-            # Store stream data in global storage
-            streams_storage[stream_id] = stream_data
+            # Security: Thread-safe storage access
+            with storage_lock:
+                streams_storage[stream_id] = stream_data
             
             logger.info(f"✅ {platform}: Stream proxy ready for {stream_id} (via {source})")
             
@@ -821,11 +956,32 @@ async def download_video(data: DownloadRequest, state: State) -> DownloadRespons
 
 @get("/files/{filename:str}")
 async def serve_file(filename: str) -> File:
-    """Serve downloaded files"""
-    file_path = os.path.join(DOWNLOAD_DIR, filename)
+    """Serve downloaded files with path traversal protection"""
+    from pathlib import Path
+    
+    # Security: Sanitize filename to prevent path traversal
+    safe_filename = Path(filename).name  # Removes any path components
+    
+    # Remove any remaining dangerous characters
+    safe_filename = re.sub(r'[^\w\s\-_.]', '', safe_filename)
+    
+    if not safe_filename:
+        raise HTTPException(status_code=400, detail="Invalid filename")
+    
+    file_path = os.path.join(DOWNLOAD_DIR, safe_filename)
+    
+    # Security: Verify the resolved path is within DOWNLOAD_DIR
+    abs_file_path = os.path.abspath(file_path)
+    abs_download_dir = os.path.abspath(DOWNLOAD_DIR)
+    
+    if not abs_file_path.startswith(abs_download_dir):
+        logger.warning(f"🚫 Path traversal attempt blocked: {filename}")
+        raise HTTPException(status_code=403, detail="Access denied")
+    
     if not os.path.exists(file_path):
         raise HTTPException(status_code=404, detail="File not found")
-    return File(file_path, filename=filename)
+    
+    return File(file_path, filename=safe_filename)
 
 @get("/stream/{stream_id:str}")
 async def stream_proxy(stream_id: str, state: State) -> Stream:
