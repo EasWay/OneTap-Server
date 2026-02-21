@@ -908,45 +908,33 @@ async def download_video(data: DownloadRequest, state: State) -> DownloadRespons
         source = extraction_result.get("source", "j2")
         title = extraction_result.get("title", "video")
         
-        # YouTube: Return direct URL for client-side download (avoids IP restrictions)
-        if platform == "youtube":
-            logger.info(f"✅ YouTube: Returning direct URL for client-side download (via {source})")
-            
-            return DownloadResponse(
-                status="success",
-                download_url=extraction_result["url"],  # Direct URL for YouTube
-                filename=f"{title}.{ext}",
-                message="Direct download URL ready",
-                title=title,
-                platform=platform
-            )
+        # All platforms: Use stream proxy approach (including YouTube)
+        # This prevents 403 errors by proxying the request through the server
         
-        # Other platforms: Use stream proxy approach
-        else:
-            # Store the direct URL and metadata for streaming
-            stream_id = uid
-            stream_data = {
-                "url": extraction_result["url"],
-                "ext": ext,
-                "title": title,
-                "platform": platform,
-                "source": source
-            }
-            
-            # Security: Thread-safe storage access
-            with storage_lock:
-                streams_storage[stream_id] = stream_data
-            
-            logger.info(f"✅ {platform}: Stream proxy ready for {stream_id} (via {source})")
-            
-            return DownloadResponse(
-                status="success",
-                download_url=f"/stream/{stream_id}",
-                filename=f"{title}.{ext}",
-                message="Stream proxy ready",
-                title=title,
-                platform=platform
-            )
+        # Store the direct URL and metadata for streaming
+        stream_id = uid
+        stream_data = {
+            "url": extraction_result["url"],
+            "ext": ext,
+            "title": title,
+            "platform": platform,
+            "source": source
+        }
+        
+        # Security: Thread-safe storage access
+        with storage_lock:
+            streams_storage[stream_id] = stream_data
+        
+        logger.info(f"✅ {platform}: Stream proxy ready for {stream_id} (via {source})")
+        
+        return DownloadResponse(
+            status="success",
+            download_url=f"/stream/{stream_id}",
+            filename=f"{title}.{ext}",
+            message="Stream proxy ready",
+            title=title,
+            platform=platform
+        )
         
     except HTTPException:
         raise
