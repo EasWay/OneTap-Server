@@ -908,9 +908,20 @@ async def download_video(data: DownloadRequest, state: State) -> DownloadRespons
         source = extraction_result.get("source", "j2")
         title = extraction_result.get("title", "video")
         
-        # All platforms: Use stream proxy approach (including YouTube)
-        # This prevents 403 errors by proxying the request through the server
+        # YouTube: Return direct URL (YouTube URLs are IP-restricted and can't be proxied)
+        if platform == "youtube":
+            logger.info(f"✅ YouTube: Returning direct URL for client download (via {source})")
+            
+            return DownloadResponse(
+                status="success",
+                download_url=extraction_result["url"],
+                filename=f"{title}.{ext}",
+                message="Direct download URL ready",
+                title=title,
+                platform=platform
+            )
         
+        # Other platforms: Use stream proxy approach
         # Store the direct URL and metadata for streaming
         stream_id = uid
         stream_data = {
@@ -1020,9 +1031,9 @@ async def stream_proxy(stream_id: str, state: State) -> Stream:
                 "Connection": "keep-alive"
             }
         
-        # Create HTTP client
+        # Create HTTP client with longer timeouts for YouTube
         client = httpx.AsyncClient(
-            timeout=httpx.Timeout(120.0, connect=15.0),
+            timeout=httpx.Timeout(180.0, connect=30.0),  # 3 min total, 30s connect
             follow_redirects=True,
             limits=httpx.Limits(max_keepalive_connections=10, max_connections=20)
         )
