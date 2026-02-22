@@ -4,7 +4,6 @@ import logging
 import re
 import asyncio
 import uvloop
-import ipaddress
 from typing import Dict, List, Optional, Any
 from urllib.parse import urlparse
 
@@ -19,104 +18,6 @@ import httpx
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
-
-# Security: Allowed domains for SSRF prevention
-ALLOWED_DOMAINS = [
-    'youtube.com', 'youtu.be', 'm.youtube.com', 'youtube-nocookie.com',
-    'tiktok.com', 'vm.tiktok.com', 'vt.tiktok.com', 'douyin.com', 'capcut.com',
-    'facebook.com', 'fb.watch', 'fb.com', 'm.facebook.com',
-    'instagram.com', 'instagr.am', 'ig.me', 'threads.net',
-    'twitter.com', 'x.com', 't.co', 'mobile.twitter.com',
-    'vimeo.com', 'dailymotion.com', 'bilibili.com', 'b23.tv',
-    'rumble.com', 'streamable.com', 'ted.com', 'sohu.com', 'tv.sohu.com', 'bitchute.com',
-    'kuaishou.com', 'kwai.com', 'xiaohongshu.com', 'xhslink.com',
-    'ixigua.com', 'weibo.com', 'weibo.cn', 'miaopai.com', 'meipai.com',
-    'xiaoying.tv', 'yingke.com', 'sina.com', 'qq.com',
-    'reddit.com', 'redd.it', 'snapchat.com', 'pinterest.com', 'pin.it',
-    'tumblr.com', 'linkedin.com', 'lnkd.in', 'telegram.org', 't.me',
-    'bsky.app', 'bluesky.social', 'sharechat.com', 'likee.video', 'like.video',
-    'hipi.co.in', 'imdb.com', 'imgur.com', 'ifunny.co', 'izlesene.com',
-    'espn.com', '9gag.com', 'ok.ru', 'oke.ru', 'febspot.com', 'getstickerpack.com',
-    'soundcloud.com', 'snd.sc', 'mixcloud.com', 'spotify.com', 'spoti.fi',
-    'deezer.com', 'zingmp3.vn', 'bandcamp.com', 'castbox.fm', 'mediafire.com',
-    'pornbox.com', 'xvideos.com', 'xnxx.com',
-    # J2Download domain
-    'j2download.com'
-]
-
-# Security: Blocked hosts and ports for SSRF prevention
-BLOCKED_HOSTS = [
-    'localhost', '127.0.0.1', '0.0.0.0', '::1',
-    '169.254.169.254',  # AWS metadata
-    '169.254.170.2',    # ECS metadata
-    'metadata.google.internal',  # GCP metadata
-    '100.100.100.200',  # Alibaba Cloud metadata
-]
-
-BLOCKED_PORTS = [22, 23, 25, 3306, 5432, 6379, 27017, 11211, 9200]  # SSH, Telnet, SMTP, MySQL, PostgreSQL, Redis, MongoDB, Memcached, Elasticsearch
-
-def validate_url_security(url: str) -> bool:
-    """
-    Validate URL to prevent SSRF attacks
-    Returns True if URL is safe, False otherwise
-    """
-    try:
-        parsed = urlparse(url)
-        
-        # Check if scheme is allowed
-        if parsed.scheme not in ['http', 'https']:
-            logger.warning(f"🚫 Blocked URL with invalid scheme: {parsed.scheme}")
-            return False
-        
-        # Check if domain is in allowed list
-        hostname = parsed.hostname
-        if not hostname:
-            logger.warning(f"🚫 Blocked URL with no hostname")
-            return False
-        
-        # Check against allowed domains
-        is_allowed = any(
-            hostname == domain or hostname.endswith('.' + domain)
-            for domain in ALLOWED_DOMAINS
-        )
-        
-        if not is_allowed:
-            logger.warning(f"🚫 Blocked URL with unauthorized domain: {hostname}")
-            return False
-        
-        # Check if hostname resolves to blocked IP
-        try:
-            # Resolve hostname to IP
-            import socket
-            ip = socket.gethostbyname(hostname)
-            ip_obj = ipaddress.ip_address(ip)
-            
-            # Block private/internal IPs
-            if ip_obj.is_private or ip_obj.is_loopback or ip_obj.is_link_local:
-                logger.warning(f"🚫 Blocked URL resolving to private IP: {ip}")
-                return False
-            
-            # Block specific IPs
-            if ip in BLOCKED_HOSTS:
-                logger.warning(f"🚫 Blocked URL resolving to blocked IP: {ip}")
-                return False
-                
-        except socket.gaierror:
-            logger.warning(f"🚫 Could not resolve hostname: {hostname}")
-            return False
-        
-        # Check if port is blocked
-        port = parsed.port
-        if port and port in BLOCKED_PORTS:
-            logger.warning(f"🚫 Blocked URL with forbidden port: {port}")
-            return False
-        
-        logger.info(f"✅ URL passed security validation: {hostname}")
-        return True
-        
-    except Exception as e:
-        logger.error(f"❌ Error validating URL: {e}")
-        return False
 
 # Set uvloop as the event loop policy for maximum performance
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
@@ -195,13 +96,8 @@ def remove_query_params(url: str) -> str:
         return url
 
 async def expand_short_url(url: str) -> str:
-    """Resolves short URLs for all supported platforms - ASYNC VERSION with SSRF protection"""
+    """Resolves short URLs for all supported platforms - ASYNC VERSION"""
     try:
-        # Security: Validate URL before processing
-        if not validate_url_security(url):
-            logger.warning(f"🚫 URL failed security validation: {url}")
-            return url  # Return original if validation fails
-        
         short_domains = [
             # TikTok & Related
             'vt.tiktok.com', 'vm.tiktok.com', 'tiktok.com/t/',
@@ -220,43 +116,15 @@ async def expand_short_url(url: str) -> str:
             logger.info(f"🔗 Expanding short URL: {url}")
             headers = {"User-Agent": J2_UA}
             
-            async with httpx.AsyncClient(timeout=10.0, follow_redirects=False) as client:
+            async with httpx.AsyncClient(timeout=10.0) as client:
                 try:
-                    # Follow redirects manually with validation
-                    current_url = url
-                    max_redirects = 5
-                    redirect_count = 0
-                    
-                    while redirect_count < max_redirects:
-                        resp = await client.head(current_url, headers=headers)
-                        
-                        if resp.status_code in [301, 302, 303, 307, 308]:
-                            redirect_url = resp.headers.get('location')
-                            if not redirect_url:
-                                break
-                            
-                            # Security: Validate redirect URL
-                            if not validate_url_security(redirect_url):
-                                logger.warning(f"🚫 Blocked redirect to unsafe URL: {redirect_url}")
-                                return url
-                            
-                            current_url = redirect_url
-                            redirect_count += 1
-                        else:
-                            break
-                    
-                    resolved = current_url
-                    
+                    resp = await client.head(url, headers=headers, follow_redirects=True)
+                    if resp.status_code >= 400:
+                        raise Exception("Head failed")
                 except:
-                    # Fallback to GET if HEAD fails
-                    resp = await client.get(url, headers=headers, follow_redirects=False)
-                    resolved = str(resp.url)
-                    
-                    # Security: Validate final URL
-                    if not validate_url_security(resolved):
-                        logger.warning(f"🚫 Resolved URL failed validation: {resolved}")
-                        return url
+                    resp = await client.get(url, headers=headers, follow_redirects=True)
                 
+                resolved = str(resp.url)
                 if "login" not in resolved and "error" not in resolved:
                     clean = remove_query_params(resolved)
                     logger.info(f"✅ Resolved to: {clean}")
@@ -669,23 +537,16 @@ class AsyncJ2Extractor:
                         return {
                             "url": best_media.get("url"),
                             "ext": best_media.get("extension", "jpg"),
-                            "title": data.get("title") or data.get("author", "") or f"{platform}_post",
+                            "title": data.get("title", "video"),
                             "medias": medias,  # Include all media items
                             "type": "multi_image"
                         }
                     else:
-                        # Single media item - better title fallback
-                        title = (
-                            data.get("title") or 
-                            data.get("author", "") or 
-                            f"{platform}_{data.get('id', '')}" or
-                            f"{platform}_video"
-                        )
-                        
+                        # Single media item
                         return {
                             "url": best_media.get("url"),
                             "ext": best_media.get("extension", "mp4"),
-                            "title": title
+                            "title": data.get("title", "video")
                         }
                 else:
                     logger.warning("⚠️ J2Download: No suitable media found in response")
@@ -699,10 +560,10 @@ class AsyncJ2Extractor:
 async def get_version() -> Dict[str, Any]:
     """Version endpoint for system updates"""
     return {
-        "version": "1.6",
-        "latest_version": 6,  # Version code for comparison
-        "apk_url": "https://github.com/EasWay/OneTap-Releases/releases/download/v1.6/app-release.apk",
-        "release_notes": "🚀 OneTap v1.6 - Simplified & Optimized\n\n✨ New Features:\n• Unified J2Download extraction for all platforms\n• Fixed YouTube URL truncation issues\n• Improved URL processing and validation\n• Enhanced stream proxy for all platforms\n\n🔧 Performance Improvements:\n• Simplified extraction strategy (removed complexity)\n• Better YouTube parameter preservation\n• Smarter URL cleaning that preserves essential data\n• Optimized for reliability over speed\n\n🐛 Bug Fixes:\n• Fixed YouTube regular video URLs being truncated\n• Improved URL expansion and cleaning logic\n• Better error handling for malformed URLs\n• Enhanced compatibility with all YouTube URL formats",
+        "version": "1.7",
+        "latest_version": 7,  # Version code for comparison
+        "apk_url": "https://github.com/YourUsername/OneTap/releases/download/v1.7/OneTap_v1.7.apk",
+        "release_notes": "🚀 OneTap v1.7 - Simplified & Optimized\n\n✨ New Features:\n• Unified J2Download extraction for all platforms\n• Fixed YouTube URL truncation issues\n• Improved URL processing and validation\n• Enhanced stream proxy for all platforms\n\n🔧 Performance Improvements:\n• Simplified extraction strategy (removed complexity)\n• Better YouTube parameter preservation\n• Smarter URL cleaning that preserves essential data\n• Optimized for reliability over speed\n\n🐛 Bug Fixes:\n• Fixed YouTube regular video URLs being truncated\n• Improved URL expansion and cleaning logic\n• Better error handling for malformed URLs\n• Enhanced compatibility with all YouTube URL formats",
         "status": "online",
         "service": "Universal Media Downloader - ASYNC EDITION",
         "framework": "Litestar (ASGI)",
@@ -823,15 +684,8 @@ async def index() -> Dict[str, Any]:
         }
     }
 
-from litestar.datastructures import State
-from threading import Lock
-
-# Security: Thread-safe global streams storage with lock
-streams_storage: Dict[str, Dict[str, Any]] = {}
-storage_lock = Lock()
-
 @post("/download")
-async def download_video(data: DownloadRequest, state: State) -> DownloadResponse:
+async def download_video(data: DownloadRequest) -> DownloadResponse:
     """
     ASYNC High-Performance Download Endpoint with Stream Proxy
     - Uses Pydantic for automatic validation
@@ -878,8 +732,11 @@ async def download_video(data: DownloadRequest, state: State) -> DownloadRespons
                     ext = image.get("extension", "jpg")
                     image_stream_id = f"{uid}_image_{i+1}"
                     
-                    # Store each image stream in global storage
-                    streams_storage[image_stream_id] = {
+                    # Store each image stream
+                    if not hasattr(app.state, 'streams'):
+                        app.state.streams = {}
+                    
+                    app.state.streams[image_stream_id] = {
                         "url": image["url"],
                         "ext": ext,
                         "title": f"image_{i+1}",
@@ -903,25 +760,11 @@ async def download_video(data: DownloadRequest, state: State) -> DownloadRespons
                     platform=platform
                 )
         
-        # For single video/audio files
+        # For single video/audio files - use stream proxy for all platforms
         ext = extraction_result.get("ext", "mp4")
         source = extraction_result.get("source", "j2")
         title = extraction_result.get("title", "video")
         
-        # YouTube: Return direct URL (YouTube URLs are IP-restricted and can't be proxied)
-        if platform == "youtube":
-            logger.info(f"✅ YouTube: Returning direct URL for client download (via {source})")
-            
-            return DownloadResponse(
-                status="success",
-                download_url=extraction_result["url"],
-                filename=f"{title}.{ext}",
-                message="Direct download URL ready",
-                title=title,
-                platform=platform
-            )
-        
-        # Other platforms: Use stream proxy approach
         # Store the direct URL and metadata for streaming
         stream_id = uid
         stream_data = {
@@ -932,9 +775,10 @@ async def download_video(data: DownloadRequest, state: State) -> DownloadRespons
             "source": source
         }
         
-        # Security: Thread-safe storage access
-        with storage_lock:
-            streams_storage[stream_id] = stream_data
+        # Store stream data in memory (in production, use Redis or database)
+        if not hasattr(app.state, 'streams'):
+            app.state.streams = {}
+        app.state.streams[stream_id] = stream_data
         
         logger.info(f"✅ {platform}: Stream proxy ready for {stream_id} (via {source})")
         
@@ -955,35 +799,14 @@ async def download_video(data: DownloadRequest, state: State) -> DownloadRespons
 
 @get("/files/{filename:str}")
 async def serve_file(filename: str) -> File:
-    """Serve downloaded files with path traversal protection"""
-    from pathlib import Path
-    
-    # Security: Sanitize filename to prevent path traversal
-    safe_filename = Path(filename).name  # Removes any path components
-    
-    # Remove any remaining dangerous characters
-    safe_filename = re.sub(r'[^\w\s\-_.]', '', safe_filename)
-    
-    if not safe_filename:
-        raise HTTPException(status_code=400, detail="Invalid filename")
-    
-    file_path = os.path.join(DOWNLOAD_DIR, safe_filename)
-    
-    # Security: Verify the resolved path is within DOWNLOAD_DIR
-    abs_file_path = os.path.abspath(file_path)
-    abs_download_dir = os.path.abspath(DOWNLOAD_DIR)
-    
-    if not abs_file_path.startswith(abs_download_dir):
-        logger.warning(f"🚫 Path traversal attempt blocked: {filename}")
-        raise HTTPException(status_code=403, detail="Access denied")
-    
+    """Serve downloaded files"""
+    file_path = os.path.join(DOWNLOAD_DIR, filename)
     if not os.path.exists(file_path):
         raise HTTPException(status_code=404, detail="File not found")
-    
-    return File(file_path, filename=safe_filename)
+    return File(file_path, filename=filename)
 
 @get("/stream/{stream_id:str}")
-async def stream_proxy(stream_id: str, state: State) -> Stream:
+async def stream_proxy(stream_id: str) -> Stream:
     """
     Stream Proxy Endpoint - The Cobalt Way
     
@@ -992,15 +815,18 @@ async def stream_proxy(stream_id: str, state: State) -> Stream:
     This prevents 403 errors caused by signature validation failures.
     """
     from litestar.types import Receive, Scope, Send
-    from litestar.response import Response
     
     try:
-        # Get stream data from global storage
-        if stream_id not in streams_storage:
-            logger.error(f"❌ Stream {stream_id} not found in {list(streams_storage.keys())}")
+        # Get stream data
+        if not hasattr(app.state, 'streams'):
+            logger.error(f"❌ App state has no streams attribute")
+            raise HTTPException(status_code=500, detail="Server state not initialized")
+            
+        if stream_id not in app.state.streams:
+            logger.error(f"❌ Stream {stream_id} not found in {list(app.state.streams.keys())}")
             raise HTTPException(status_code=404, detail="Stream not found")
         
-        stream_data = streams_storage[stream_id]
+        stream_data = app.state.streams[stream_id]
         video_url = stream_data["url"]
         ext = stream_data["ext"]
         title = stream_data["title"]
@@ -1010,75 +836,73 @@ async def stream_proxy(stream_id: str, state: State) -> Stream:
         logger.info(f"🌊 Starting stream proxy for {platform}: {stream_id} (via {source})")
         logger.info(f"📺 Video URL: {video_url[:100]}...")
         
-        # Determine headers based on source
-        if source == "rapidapi":
-            request_headers = {
-                "User-Agent": "OneTap-Server/4.0.0",
-                "Accept": "*/*",
-                "Connection": "keep-alive"
-            }
-        elif platform == "youtube":
-            request_headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36",
-                "Accept": "*/*",
-                "Referer": "https://www.youtube.com/",
-                "Connection": "keep-alive"
-            }
-        else:
-            request_headers = {
-                "User-Agent": EXACT_UA,
-                "Accept": "*/*",
-                "Connection": "keep-alive"
-            }
-        
-        # Create HTTP client with longer timeouts for YouTube
-        client = httpx.AsyncClient(
-            timeout=httpx.Timeout(180.0, connect=30.0),  # 3 min total, 30s connect
-            follow_redirects=True,
-            limits=httpx.Limits(max_keepalive_connections=10, max_connections=20)
-        )
-        
-        # Start the GET request to get headers including Content-Length
-        logger.info(f"🚀 Initiating stream from {source}...")
-        response = await client.get(video_url, headers=request_headers)
-        
-        logger.info(f"� Response status: {response.status_code}")
-        
-        if response.status_code not in [200, 206]:
-            await client.aclose()
-            error_msg = f"HTTP {response.status_code}: {response.reason_phrase}"
-            logger.error(f"❌ {error_msg}")
-            raise HTTPException(status_code=response.status_code, detail=error_msg)
-        
-        # Extract Content-Length from response
-        content_length = response.headers.get("content-length")
-        if content_length:
-            logger.info(f"📏 Content-Length: {content_length} bytes ({int(content_length)/1024/1024:.2f} MB)")
-        else:
-            logger.warning(f"⚠️ No Content-Length header from source")
-        
         async def stream_generator():
             """Generator that streams video data chunk by chunk"""
             try:
-                logger.info(f"✅ Streaming content...")
+                # Optimized headers based on source
+                if source == "rapidapi":
+                    headers = {
+                        "User-Agent": "OneTap-Server/4.0.0",
+                        "Accept": "*/*",
+                        "Connection": "keep-alive"
+                    }
+                    use_redirects = True
+                elif platform == "youtube":
+                    headers = {
+                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36",
+                        "Accept": "*/*",
+                        "Referer": "https://www.youtube.com/",
+                        "Connection": "keep-alive"
+                    }
+                    use_redirects = True
+                else:
+                    headers = {
+                        "User-Agent": EXACT_UA,
+                        "Accept": "*/*",
+                        "Connection": "keep-alive"
+                    }
+                    use_redirects = True
                 
-                # Stream the response we already started
-                total_bytes = 0
-                async for chunk in response.aiter_bytes(chunk_size=65536):  # 64KB chunks
-                    if chunk:
-                        total_bytes += len(chunk)
-                        yield chunk
-                
-                logger.info(f"✅ Stream complete: {total_bytes:,} bytes")
-                
+                # Optimized HTTP client settings
+                async with httpx.AsyncClient(
+                    timeout=httpx.Timeout(120.0, connect=15.0),
+                    follow_redirects=use_redirects,
+                    limits=httpx.Limits(max_keepalive_connections=10, max_connections=20)
+                ) as client:
+                    
+                    logger.info(f"🚀 Streaming from {source}...")
+                    
+                    # Direct streaming - no complex redirect handling
+                    response = await client.get(video_url, headers=headers)
+                    
+                    if response.status_code not in [200, 206]:
+                        logger.error(f"❌ HTTP {response.status_code}: {response.reason_phrase}")
+                        return
+                    
+                    logger.info(f"✅ Connected! Streaming content...")
+                    
+                    # High-performance streaming with larger chunks
+                    total_bytes = 0
+                    async for chunk in response.aiter_bytes(chunk_size=65536):  # 64KB chunks for speed
+                        if chunk:
+                            total_bytes += len(chunk)
+                            yield chunk
+                    
+                    logger.info(f"✅ Stream complete: {total_bytes:,} bytes")
+                    
+                    # Clean up stream data
+                    if hasattr(app.state, 'streams') and stream_id in app.state.streams:
+                        del app.state.streams[stream_id]
+                        
             except Exception as e:
                 logger.error(f"❌ Stream generator error: {e}")
-                raise
-            finally:
-                # Clean up
-                await client.aclose()
-                if stream_id in streams_storage:
-                    del streams_storage[stream_id]
+                logger.error(f"❌ Error type: {type(e).__name__}")
+                import traceback
+                logger.error(f"❌ Traceback: {traceback.format_exc()}")
+                # Clean up on error
+                if hasattr(app.state, 'streams') and stream_id in app.state.streams:
+                    del app.state.streams[stream_id]
+                return
         
         # Determine content type based on extension
         content_type_map = {
@@ -1092,36 +916,20 @@ async def stream_proxy(stream_id: str, state: State) -> Stream:
         }
         content_type = content_type_map.get(ext.lower(), "application/octet-stream")
         
-        # Create safe filename - handle Unicode and special characters properly
-        safe_title = re.sub(r'\s+', ' ', title)
-        safe_title = safe_title.encode('ascii', 'ignore').decode('ascii')
-        safe_title = re.sub(r'[^\w\s-]', '', safe_title).strip()[:50]
-        if not safe_title:
-            safe_title = f"media_{stream_id[:8]}"
-        
-        filename = f"{safe_title}.{ext}"
-        
-        # URL encode the filename
-        from urllib.parse import quote
-        encoded_filename = quote(filename)
+        # Create safe filename
+        safe_title = re.sub(r'[^\w\s-]', '', title).strip()[:50]
+        filename = f"{safe_title}.{ext}" if safe_title else f"video.{ext}"
         
         logger.info(f"🎬 Returning stream response: {filename} ({content_type})")
-        
-        # Build response headers
-        response_headers = {
-            "Content-Disposition": f"attachment; filename*=UTF-8''{encoded_filename}",
-            "Cache-Control": "no-cache"
-        }
-        
-        # Add Content-Length if available
-        if content_length:
-            response_headers["Content-Length"] = content_length
-            logger.info(f"✅ Including Content-Length: {content_length} bytes")
         
         return Stream(
             stream_generator(),
             media_type=content_type,
-            headers=response_headers
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"',
+                "Cache-Control": "no-cache",
+                "Accept-Ranges": "bytes"
+            }
         )
         
     except HTTPException:
