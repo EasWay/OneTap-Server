@@ -716,7 +716,27 @@ async def download_video(data: DownloadRequest) -> DownloadResponse:
         if not extraction_result:
             raise HTTPException(status_code=400, detail="All extraction methods failed")
         
-        logger.info("✅ Extraction successful. Setting up stream proxy...")
+        logger.info(f"✅ Extraction successful. Platform: {platform}")
+        logger.info(f"📦 Extraction result keys: {extraction_result.keys()}")
+        logger.info(f"🔗 Direct URL: {extraction_result.get('url', 'N/A')[:100]}...")
+        
+        # PRIORITY: YouTube - ALWAYS return direct URL (must be before multi-image check)
+        if platform == "youtube":
+            ext = extraction_result.get("ext", "mp4")
+            title = extraction_result.get("title", "video")
+            direct_url = extraction_result["url"]
+            
+            logger.info(f"🎬 YouTube detected - returning DIRECT URL to client")
+            logger.info(f"📱 Direct URL (first 150 chars): {direct_url[:150]}...")
+            
+            return DownloadResponse(
+                status="success",
+                download_url=direct_url,  # Direct YouTube URL
+                filename=f"{title}.{ext}",
+                message="Direct download URL ready",
+                title=title,
+                platform=platform
+            )
         
         # Check if it's a multi-image post (like TikTok photo slideshow)
         if isinstance(extraction_result, dict) and "medias" in extraction_result:
@@ -760,15 +780,17 @@ async def download_video(data: DownloadRequest) -> DownloadResponse:
                     platform=platform
                 )
         
-        # For single video/audio files - use stream proxy for all platforms
+        # For single video/audio files (non-YouTube, non-multi-image)
         ext = extraction_result.get("ext", "mp4")
         source = extraction_result.get("source", "j2")
         title = extraction_result.get("title", "video")
+        direct_url = extraction_result["url"]
         
+        # All other platforms: Use stream proxy approach
         # Store the direct URL and metadata for streaming
         stream_id = uid
         stream_data = {
-            "url": extraction_result["url"],
+            "url": direct_url,
             "ext": ext,
             "title": title,
             "platform": platform,
