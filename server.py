@@ -814,6 +814,14 @@ async def download_video(data: DownloadRequest) -> DownloadResponse:
             "original_url": url  # Store original URL for re-extraction if needed
         }
         
+        logger.info(f"📦 Storing stream data for {stream_id}:")
+        logger.info(f"   - URL: {direct_url[:100]}...")
+        logger.info(f"   - Extension: {ext}")
+        logger.info(f"   - Title: {title}")
+        logger.info(f"   - Platform: {platform}")
+        logger.info(f"   - Source: {source}")
+        logger.info(f"   - Original URL: {url[:100]}...")
+        
         # Store stream data in memory (in production, use Redis or database)
         if not hasattr(app.state, 'streams'):
             app.state.streams = {}
@@ -856,6 +864,9 @@ async def stream_proxy(stream_id: str) -> Stream:
     For TikTok, we re-extract fresh URLs to avoid expiration issues.
     """
     from litestar.types import Receive, Scope, Send
+    import traceback
+    
+    logger.info(f"🌊 Stream endpoint called for: {stream_id}")
     
     try:
         # Get stream data
@@ -868,19 +879,73 @@ async def stream_proxy(stream_id: str) -> Stream:
             raise HTTPException(status_code=404, detail="Stream not found")
         
         stream_data = app.state.streams[stream_id]
-        video_url = stream_data["url"]
-        ext = stream_data["ext"]
-        title = stream_data["title"]
-        platform = stream_data["platform"]
+        logger.info(f"📦 Stream data retrieved: {stream_data.keys()}")
+        
+        video_url = stream_data.get("url")
+        ext = stream_data.get("ext")
+        title = stream_data.get("title")
+        platform = stream_data.get("platform")
         source = stream_data.get("source", "j2")
-        original_url = stream_data.get("original_url")  # Store original URL for re-extraction
+        original_url = stream_data.get("original_url")
+        
+        # Validate all required fields
+        if not video_url:
+            logger.error(f"❌ Missing video URL in stream data")
+            raise HTTPException(status_code=500, detail="Missing video URL")
+        if not ext:
+            logger.error(f"❌ Missing extension in stream data")
+            raise HTTPException(status_code=500, detail="Missing extension")
+        if not title:
+            logger.error(f"❌ Missing title in stream data")
+            raise HTTPException(status_code=500, detail="Missing title")
+        if not platform:
+            logger.error(f"❌ Missing platform in stream data")
+            raise HTTPException(status_code=500, detail="Missing platform")
         
         logger.info(f"🌊 Starting stream proxy for {platform}: {stream_id} (via {source})")
-        logger.info(f"📺 Video URL: {video_url[:100]}...")
+        logger.info(f"📺 Video URL (full): {video_url}")
+        logger.info(f"📺 Extension: {ext}")
+        logger.info(f"📺 Title: {title}")
         
         async def stream_generator():
             """Generator that streams video data chunk by chunk"""
-            logger.info(f"🎬 Stream generator started!")
+            logger.info(f"🎬 Stream generator started for {platform}!")
+            logger.info(f"🎬 Generator URL: {video_url}")
+            
+            # Check URL expiry for TikTok
+            if platform == "tiktok" and "x-expires=" in video_url:
+                import time
+                from urllib.parse import parse_qs, urlparse
+                
+                try:
+                    parsed = urlparse(video_url)
+                    params = parse_qs(parsed.query)
+                    expires_timestamp = int(params.get('x-expires', [0])[0])
+                    current_timestamp = int(time.time())
+                    
+                    logger.info(f"⏰ URL expires at: {expires_timestamp}")
+                    logger.info(f"⏰ Current time: {current_timestamp}")
+                    logger.info(f"⏰ Time until expiry: {expires_timestamp - current_timestamp} seconds")
+                    
+                    if current_timestamp >= expires_timestamp:
+                        logger.error(f"❌ URL EXPIRED! Need to re-extract")
+                        if original_url:
+                            logger.info(f"🔄 Re-extracting fresh URL from: {original_url}")
+                            j2 = AsyncJ2Extractor()
+                            fresh_result = await j2.extract_download_url(original_url)
+                            
+                            if fresh_result and fresh_result.get("url"):
+                                nonlocal video_url
+                                video_url = fresh_result["url"]
+                                logger.info(f"✅ Got fresh URL: {video_url[:100]}...")
+                            else:
+                                logger.error(f"❌ Failed to get fresh URL")
+                                raise Exception("URL expired and re-extraction failed")
+                        else:
+                            logger.error(f"❌ No original URL to re-extract from")
+                            raise Exception("URL expired and no original URL available")
+                except Exception as expiry_check_error:
+                    logger.warning(f"⚠️ Expiry check failed: {expiry_check_error}")
             
             try:
                 # For TikTok, try to re-extract if URL fails (expired signature)
@@ -989,12 +1054,15 @@ async def stream_proxy(stream_id: str) -> Stream:
             except Exception as e:
                 logger.error(f"❌ Stream generator error: {e}")
                 logger.error(f"❌ Error type: {type(e).__name__}")
+                logger.error(f"❌ Platform: {platform}")
+                logger.error(f"❌ Source: {source}")
+                logger.error(f"❌ URL: {video_url[:200] if video_url else 'N/A'}...")
                 import traceback
-                logger.error(f"❌ Traceback: {traceback.format_exc()}")
+                logger.error(f"❌ Full traceback:\n{traceback.format_exc()}")
                 # Clean up on error
                 if hasattr(app.state, 'streams') and stream_id in app.state.streams:
                     del app.state.streams[stream_id]
-                return
+                raise  # Re-raise to propagate to outer handler
         
         # Determine content type based on extension
         content_type_map = {
@@ -1015,7 +1083,8 @@ async def stream_proxy(stream_id: str) -> Stream:
         logger.info(f"🎬 Returning stream response: {filename} ({content_type})")
         
         try:
-            return Stream(
+            logger.info(f"🎬 Creating Stream object...")
+            stream_response = Stream(
                 stream_generator(),
                 media_type=content_type,
                 headers={
@@ -1024,20 +1093,23 @@ async def stream_proxy(stream_id: str) -> Stream:
                     "Accept-Ranges": "bytes"
                 }
             )
+            logger.info(f"✅ Stream object created successfully")
+            return stream_response
         except Exception as stream_error:
             logger.error(f"❌ Failed to create Stream response: {stream_error}")
             logger.error(f"❌ Stream error type: {type(stream_error).__name__}")
             import traceback
-            logger.error(f"❌ Traceback: {traceback.format_exc()}")
+            logger.error(f"❌ Full traceback:\n{traceback.format_exc()}")
             raise HTTPException(status_code=500, detail=f"Failed to create stream: {str(stream_error)}")
         
-    except HTTPException:
+    except HTTPException as http_exc:
+        logger.error(f"❌ HTTP Exception in stream_proxy: {http_exc.detail}")
         raise
     except Exception as e:
         logger.error(f"❌ Stream proxy error: {e}")
         logger.error(f"❌ Error type: {type(e).__name__}")
         import traceback
-        logger.error(f"❌ Traceback: {traceback.format_exc()}")
+        logger.error(f"❌ Full traceback:\n{traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=f"Stream proxy error: {str(e)}")
 
 # Create Litestar app
