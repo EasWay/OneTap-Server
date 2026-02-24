@@ -720,20 +720,36 @@ async def download_video(data: DownloadRequest) -> DownloadResponse:
         logger.info(f"📦 Extraction result keys: {extraction_result.keys()}")
         logger.info(f"🔗 Direct URL: {extraction_result.get('url', 'N/A')[:100]}...")
         
-        # PRIORITY: YouTube - ALWAYS return direct URL (must be before multi-image check)
+        # YouTube: Use stream proxy to avoid 403 errors from expired/IP-locked URLs
         if platform == "youtube":
             ext = extraction_result.get("ext", "mp4")
             title = extraction_result.get("title", "video")
             direct_url = extraction_result["url"]
             
-            logger.info(f"🎬 YouTube detected - returning DIRECT URL to client")
+            logger.info(f"🎬 YouTube detected - using stream proxy to avoid 403 errors")
             logger.info(f"📱 Direct URL (first 150 chars): {direct_url[:150]}...")
+            
+            # Store stream data for proxying
+            stream_id = uid
+            stream_data = {
+                "url": direct_url,
+                "ext": ext,
+                "title": title,
+                "platform": platform,
+                "source": extraction_result.get("source", "j2")
+            }
+            
+            if not hasattr(app.state, 'streams'):
+                app.state.streams = {}
+            app.state.streams[stream_id] = stream_data
+            
+            logger.info(f"✅ YouTube: Stream proxy ready for {stream_id}")
             
             return DownloadResponse(
                 status="success",
-                download_url=direct_url,  # Direct YouTube URL
+                download_url=f"/stream/{stream_id}",  # Use stream proxy
                 filename=f"{title}.{ext}",
-                message="Direct download URL ready",
+                message="Stream proxy ready",
                 title=title,
                 platform=platform
             )
@@ -885,6 +901,9 @@ async def stream_proxy(stream_id: str) -> Stream:
                     }
                     use_redirects = True
                 
+                logger.info(f"🔗 Full video URL: {video_url}")
+                logger.info(f"📋 Headers: {headers}")
+                
                 # Optimized HTTP client settings
                 async with httpx.AsyncClient(
                     timeout=httpx.Timeout(120.0, connect=15.0),
@@ -895,10 +914,18 @@ async def stream_proxy(stream_id: str) -> Stream:
                     logger.info(f"🚀 Streaming from {source}...")
                     
                     # Direct streaming - no complex redirect handling
-                    response = await client.get(video_url, headers=headers)
+                    try:
+                        response = await client.get(video_url, headers=headers)
+                        logger.info(f"📡 Response status: {response.status_code}")
+                        logger.info(f"📡 Response headers: {dict(response.headers)}")
+                    except Exception as req_error:
+                        logger.error(f"❌ Request failed: {req_error}")
+                        logger.error(f"❌ Request error type: {type(req_error).__name__}")
+                        raise
                     
                     if response.status_code not in [200, 206]:
                         logger.error(f"❌ HTTP {response.status_code}: {response.reason_phrase}")
+                        logger.error(f"❌ Response body: {response.text[:500]}")
                         return
                     
                     logger.info(f"✅ Connected! Streaming content...")
