@@ -802,6 +802,20 @@ async def download_video(data: DownloadRequest) -> DownloadResponse:
         title = extraction_result.get("title", "video")
         direct_url = extraction_result["url"]
         
+        # TikTok images: Send direct URL (they're more stable than videos)
+        if platform == "tiktok" and ext.lower() in ["jpg", "jpeg", "png", "webp"]:
+            logger.info(f"📸 TikTok image detected - sending direct URL")
+            logger.info(f"🔗 Direct URL: {direct_url}")
+            
+            return DownloadResponse(
+                status="success",
+                download_url=direct_url,  # Direct URL for images
+                filename=f"{title}.{ext}",
+                message="Direct download ready",
+                title=title,
+                platform=platform
+            )
+        
         # All other platforms: Use stream proxy approach
         # Store the direct URL and metadata for streaming
         stream_id = uid
@@ -909,47 +923,47 @@ async def stream_proxy(stream_id: str) -> Stream:
         
         async def stream_generator():
             """Generator that streams video data chunk by chunk"""
-            logger.info(f"🎬 Stream generator started for {platform}!")
-            logger.info(f"🎬 Generator URL: {video_url}")
-            
-            # Start with the original video URL
-            current_url = video_url
-            
-            # Check URL expiry for TikTok
-            if platform == "tiktok" and "x-expires=" in current_url:
-                import time
-                from urllib.parse import parse_qs, urlparse
-                
-                try:
-                    parsed = urlparse(current_url)
-                    params = parse_qs(parsed.query)
-                    expires_timestamp = int(params.get('x-expires', [0])[0])
-                    current_timestamp = int(time.time())
-                    
-                    logger.info(f"⏰ URL expires at: {expires_timestamp}")
-                    logger.info(f"⏰ Current time: {current_timestamp}")
-                    logger.info(f"⏰ Time until expiry: {expires_timestamp - current_timestamp} seconds")
-                    
-                    if current_timestamp >= expires_timestamp:
-                        logger.error(f"❌ URL EXPIRED! Need to re-extract")
-                        if original_url:
-                            logger.info(f"🔄 Re-extracting fresh URL from: {original_url}")
-                            j2 = AsyncJ2Extractor()
-                            fresh_result = await j2.extract_download_url(original_url)
-                            
-                            if fresh_result and fresh_result.get("url"):
-                                current_url = fresh_result["url"]
-                                logger.info(f"✅ Got fresh URL: {current_url[:100]}...")
-                            else:
-                                logger.error(f"❌ Failed to get fresh URL")
-                                raise Exception("URL expired and re-extraction failed")
-                        else:
-                            logger.error(f"❌ No original URL to re-extract from")
-                            raise Exception("URL expired and no original URL available")
-                except Exception as expiry_check_error:
-                    logger.warning(f"⚠️ Expiry check failed: {expiry_check_error}")
-            
             try:
+                logger.info(f"🎬 Stream generator started for {platform}!")
+                logger.info(f"🎬 Generator URL: {video_url}")
+                
+                # Start with the original video URL
+                current_url = video_url
+                
+                # Check URL expiry for TikTok
+                if platform == "tiktok" and "x-expires=" in current_url:
+                    import time
+                    from urllib.parse import parse_qs, urlparse
+                    
+                    try:
+                        parsed = urlparse(current_url)
+                        params = parse_qs(parsed.query)
+                        expires_timestamp = int(params.get('x-expires', [0])[0])
+                        current_timestamp = int(time.time())
+                        
+                        logger.info(f"⏰ URL expires at: {expires_timestamp}")
+                        logger.info(f"⏰ Current time: {current_timestamp}")
+                        logger.info(f"⏰ Time until expiry: {expires_timestamp - current_timestamp} seconds")
+                        
+                        if current_timestamp >= expires_timestamp:
+                            logger.error(f"❌ URL EXPIRED! Need to re-extract")
+                            if original_url:
+                                logger.info(f"🔄 Re-extracting fresh URL from: {original_url}")
+                                j2 = AsyncJ2Extractor()
+                                fresh_result = await j2.extract_download_url(original_url)
+                                
+                                if fresh_result and fresh_result.get("url"):
+                                    current_url = fresh_result["url"]
+                                    logger.info(f"✅ Got fresh URL: {current_url[:100]}...")
+                                else:
+                                    logger.error(f"❌ Failed to get fresh URL")
+                                    raise Exception("URL expired and re-extraction failed")
+                            else:
+                                logger.error(f"❌ No original URL to re-extract from")
+                                raise Exception("URL expired and no original URL available")
+                    except Exception as expiry_check_error:
+                        logger.warning(f"⚠️ Expiry check failed: {expiry_check_error}")
+                
                 max_retries = 2
                 
                 logger.info(f"🔄 Starting download with {max_retries} max retries")
@@ -1063,6 +1077,14 @@ async def stream_proxy(stream_id: str) -> Stream:
                 if hasattr(app.state, 'streams') and stream_id in app.state.streams:
                     del app.state.streams[stream_id]
                 raise  # Re-raise to propagate to outer handler
+            except BaseException as be:
+                logger.error(f"❌ Stream generator BaseException: {be}")
+                logger.error(f"❌ BaseException type: {type(be).__name__}")
+                import traceback
+                logger.error(f"❌ Full traceback:\n{traceback.format_exc()}")
+                if hasattr(app.state, 'streams') and stream_id in app.state.streams:
+                    del app.state.streams[stream_id]
+                raise
         
         # Determine content type based on extension
         content_type_map = {
