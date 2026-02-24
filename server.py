@@ -921,6 +921,23 @@ async def stream_proxy(stream_id: str) -> Stream:
         logger.info(f"📺 Extension: {ext}")
         logger.info(f"📺 Title: {title}")
         
+        # Get Content-Length by making a HEAD request first
+        content_length = None
+        try:
+            logger.info(f"📏 Getting content length...")
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                head_response = await client.head(video_url, headers={"User-Agent": EXACT_UA}, follow_redirects=True)
+                if head_response.status_code in [200, 206]:
+                    content_length = head_response.headers.get("content-length")
+                    if content_length:
+                        logger.info(f"📏 Content-Length: {content_length} bytes ({int(content_length) / (1024*1024):.2f} MB)")
+                    else:
+                        logger.warning(f"⚠️ No Content-Length in HEAD response")
+                else:
+                    logger.warning(f"⚠️ HEAD request failed: {head_response.status_code}")
+        except Exception as head_error:
+            logger.warning(f"⚠️ HEAD request error: {head_error}")
+        
         async def stream_generator():
             """Generator that streams video data chunk by chunk"""
             try:
@@ -1106,14 +1123,23 @@ async def stream_proxy(stream_id: str) -> Stream:
         
         try:
             logger.info(f"🎬 Creating Stream object...")
+            
+            # Build headers
+            response_headers = {
+                "Content-Disposition": f'attachment; filename="{filename}"',
+                "Cache-Control": "no-cache",
+                "Accept-Ranges": "bytes"
+            }
+            
+            # Add Content-Length if available
+            if content_length:
+                response_headers["Content-Length"] = content_length
+                logger.info(f"📏 Added Content-Length header: {content_length}")
+            
             stream_response = Stream(
                 stream_generator(),
                 media_type=content_type,
-                headers={
-                    "Content-Disposition": f'attachment; filename="{filename}"',
-                    "Cache-Control": "no-cache",
-                    "Accept-Ranges": "bytes"
-                }
+                headers=response_headers
             )
             logger.info(f"✅ Stream object created successfully")
             return stream_response
