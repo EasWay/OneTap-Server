@@ -912,13 +912,16 @@ async def stream_proxy(stream_id: str) -> Stream:
             logger.info(f"🎬 Stream generator started for {platform}!")
             logger.info(f"🎬 Generator URL: {video_url}")
             
+            # Start with the original video URL
+            current_url = video_url
+            
             # Check URL expiry for TikTok
-            if platform == "tiktok" and "x-expires=" in video_url:
+            if platform == "tiktok" and "x-expires=" in current_url:
                 import time
                 from urllib.parse import parse_qs, urlparse
                 
                 try:
-                    parsed = urlparse(video_url)
+                    parsed = urlparse(current_url)
                     params = parse_qs(parsed.query)
                     expires_timestamp = int(params.get('x-expires', [0])[0])
                     current_timestamp = int(time.time())
@@ -935,9 +938,8 @@ async def stream_proxy(stream_id: str) -> Stream:
                             fresh_result = await j2.extract_download_url(original_url)
                             
                             if fresh_result and fresh_result.get("url"):
-                                nonlocal video_url
-                                video_url = fresh_result["url"]
-                                logger.info(f"✅ Got fresh URL: {video_url[:100]}...")
+                                current_url = fresh_result["url"]
+                                logger.info(f"✅ Got fresh URL: {current_url[:100]}...")
                             else:
                                 logger.error(f"❌ Failed to get fresh URL")
                                 raise Exception("URL expired and re-extraction failed")
@@ -948,8 +950,6 @@ async def stream_proxy(stream_id: str) -> Stream:
                     logger.warning(f"⚠️ Expiry check failed: {expiry_check_error}")
             
             try:
-                # For TikTok, try to re-extract if URL fails (expired signature)
-                current_url = video_url
                 max_retries = 2
                 
                 logger.info(f"🔄 Starting download with {max_retries} max retries")
