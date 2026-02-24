@@ -867,7 +867,7 @@ async def serve_file(filename: str) -> File:
     return File(file_path, filename=filename)
 
 @get("/stream/{stream_id:str}")
-async def stream_proxy(stream_id: str):
+async def stream_proxy(stream_id: str) -> Any:
     """
     Stream Proxy Endpoint - The Cobalt Way
     
