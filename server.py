@@ -867,7 +867,7 @@ async def serve_file(filename: str) -> File:
     return File(file_path, filename=filename)
 
 @get("/stream/{stream_id:str}")
-async def stream_proxy(stream_id: str) -> Stream:
+async def stream_proxy(stream_id: str):
     """
     Stream Proxy Endpoint - The Cobalt Way
     
@@ -876,6 +876,8 @@ async def stream_proxy(stream_id: str) -> Stream:
     This prevents 403 errors caused by signature validation failures.
     
     For TikTok, we re-extract fresh URLs to avoid expiration issues.
+    
+    Returns a raw ASGI response to have full control over headers.
     """
     from litestar.types import Receive, Scope, Send
     import traceback
@@ -921,12 +923,25 @@ async def stream_proxy(stream_id: str) -> Stream:
         logger.info(f"📺 Extension: {ext}")
         logger.info(f"📺 Title: {title}")
         
-        async def stream_generator():
-            """Generator that streams video data chunk by chunk"""
+        # Determine content type
+        content_type_map = {
+            "mp4": "video/mp4",
+            "mp3": "audio/mpeg",
+            "jpg": "image/jpeg",
+            "jpeg": "image/jpeg",
+            "png": "image/png",
+            "webm": "video/webm",
+            "m4a": "audio/mp4"
+        }
+        content_type = content_type_map.get(ext.lower(), "application/octet-stream")
+        
+        # Create safe filename
+        safe_title = re.sub(r'[^\w\s-]', '', title).strip()[:50]
+        filename = f"{safe_title}.{ext}" if safe_title else f"video.{ext}"
+        
+        # Custom ASGI app that streams with proper Content-Length
+        async def asgi_app(scope: Scope, receive: Receive, send: Send):
             try:
-                logger.info(f"🎬 Stream generator started for {platform}!")
-                logger.info(f"🎬 Generator URL: {video_url}")
-                
                 # Start with the original video URL
                 current_url = video_url
                 
@@ -943,197 +958,105 @@ async def stream_proxy(stream_id: str) -> Stream:
                         
                         logger.info(f"⏰ URL expires at: {expires_timestamp}")
                         logger.info(f"⏰ Current time: {current_timestamp}")
-                        logger.info(f"⏰ Time until expiry: {expires_timestamp - current_timestamp} seconds")
                         
                         if current_timestamp >= expires_timestamp:
-                            logger.error(f"❌ URL EXPIRED! Need to re-extract")
+                            logger.error(f"❌ URL EXPIRED! Re-extracting...")
                             if original_url:
-                                logger.info(f"🔄 Re-extracting fresh URL from: {original_url}")
                                 j2 = AsyncJ2Extractor()
                                 fresh_result = await j2.extract_download_url(original_url)
-                                
                                 if fresh_result and fresh_result.get("url"):
                                     current_url = fresh_result["url"]
-                                    logger.info(f"✅ Got fresh URL: {current_url[:100]}...")
-                                else:
-                                    logger.error(f"❌ Failed to get fresh URL")
-                                    raise Exception("URL expired and re-extraction failed")
-                            else:
-                                logger.error(f"❌ No original URL to re-extract from")
-                                raise Exception("URL expired and no original URL available")
-                    except Exception as expiry_check_error:
-                        logger.warning(f"⚠️ Expiry check failed: {expiry_check_error}")
-                
-                max_retries = 2
-                
-                logger.info(f"🔄 Starting download with {max_retries} max retries")
-                
-                for attempt in range(max_retries):
-                    try:
-                        # Optimized headers based on source
-                        if source == "rapidapi":
-                            headers = {
-                                "User-Agent": "OneTap-Server/4.0.0",
-                                "Accept": "*/*",
-                                "Connection": "keep-alive"
-                            }
-                            use_redirects = True
-                        elif platform == "youtube":
-                            headers = {
-                                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36",
-                                "Accept": "*/*",
-                                "Referer": "https://www.youtube.com/",
-                                "Connection": "keep-alive"
-                            }
-                            use_redirects = True
-                        else:
-                            headers = {
-                                "User-Agent": EXACT_UA,
-                                "Accept": "*/*",
-                                "Connection": "keep-alive"
-                            }
-                            use_redirects = True
-                        
-                        if attempt > 0:
-                            logger.info(f"� Retry attempt {attempt + 1}/{max_retries}")
-                        
-                        logger.info(f"🔗 Full video URL: {current_url}")
-                        logger.info(f"📋 Headers: {headers}")
-                        
-                        # Optimized HTTP client settings
-                        async with httpx.AsyncClient(
-                            timeout=httpx.Timeout(120.0, connect=15.0),
-                            follow_redirects=use_redirects,
-                            limits=httpx.Limits(max_keepalive_connections=10, max_connections=20)
-                        ) as client:
-                            
-                            logger.info(f"🚀 Streaming from {source}...")
-                            
-                            # Direct streaming - no complex redirect handling
-                            try:
-                                response = await client.get(current_url, headers=headers)
-                                logger.info(f"📡 Response status: {response.status_code}")
-                                logger.info(f"📡 Response headers: {dict(response.headers)}")
-                                
-                                # Get actual content length from response
-                                actual_content_length = response.headers.get("content-length")
-                                if actual_content_length:
-                                    logger.info(f"📏 Actual Content-Length: {actual_content_length} bytes ({int(actual_content_length) / (1024*1024):.2f} MB)")
-                                
-                            except Exception as req_error:
-                                logger.error(f"❌ Request failed: {req_error}")
-                                logger.error(f"❌ Request error type: {type(req_error).__name__}")
-                                raise
-                            
-                            # If 403 and TikTok, try to re-extract fresh URL
-                            if response.status_code == 403 and platform == "tiktok" and original_url and attempt < max_retries - 1:
-                                logger.warning(f"⚠️ TikTok URL expired (403), re-extracting fresh URL...")
-                                logger.error(f"❌ Response body: {response.text[:500]}")
-                                
-                                # Re-extract fresh URL
-                                j2 = AsyncJ2Extractor()
-                                fresh_result = await j2.extract_download_url(original_url)
-                                
-                                if fresh_result and fresh_result.get("url"):
-                                    current_url = fresh_result["url"]
-                                    logger.info(f"✅ Got fresh TikTok URL, retrying...")
-                                    continue  # Retry with fresh URL
-                                else:
-                                    logger.error(f"❌ Failed to re-extract fresh URL")
-                                    return
-                            
-                            if response.status_code not in [200, 206]:
-                                logger.error(f"❌ HTTP {response.status_code}: {response.reason_phrase}")
-                                logger.error(f"❌ Response body: {response.text[:500]}")
-                                return
-                            
-                            logger.info(f"✅ Connected! Streaming content...")
-                            
-                            # High-performance streaming with larger chunks
-                            total_bytes = 0
-                            async for chunk in response.aiter_bytes(chunk_size=65536):  # 64KB chunks for speed
-                                if chunk:
-                                    total_bytes += len(chunk)
-                                    yield chunk
-                            
-                            logger.info(f"✅ Stream complete: {total_bytes:,} bytes")
-                            
-                            # Clean up stream data
-                            if hasattr(app.state, 'streams') and stream_id in app.state.streams:
-                                del app.state.streams[stream_id]
-                            
-                            return  # Success, exit retry loop
-                            
+                                    logger.info(f"✅ Got fresh URL")
                     except Exception as e:
-                        if attempt < max_retries - 1:
-                            logger.warning(f"⚠️ Attempt {attempt + 1} failed, retrying...")
-                            continue
-                        else:
-                            raise  # Re-raise on final attempt
+                        logger.warning(f"⚠️ Expiry check failed: {e}")
+                
+                # Make the request
+                headers_to_use = {"User-Agent": EXACT_UA, "Accept": "*/*", "Connection": "keep-alive"}
+                
+                async with httpx.AsyncClient(
+                    timeout=httpx.Timeout(120.0, connect=15.0),
+                    follow_redirects=True,
+                    limits=httpx.Limits(max_keepalive_connections=10, max_connections=20)
+                ) as client:
+                    response = await client.get(current_url, headers=headers_to_use)
+                    
+                    if response.status_code not in [200, 206]:
+                        logger.error(f"❌ HTTP {response.status_code}")
+                        await send({
+                            "type": "http.response.start",
+                            "status": 500,
+                            "headers": [[b"content-type", b"text/plain"]],
+                        })
+                        await send({
+                            "type": "http.response.body",
+                            "body": b"Failed to fetch video",
+                        })
+                        return
+                    
+                    # Get content length from actual response
+                    content_length = response.headers.get("content-length")
+                    logger.info(f"📏 Content-Length: {content_length}")
+                    
+                    # Send response headers with correct Content-Length
+                    response_headers = [
+                        [b"content-type", content_type.encode()],
+                        [b"content-disposition", f'attachment; filename="{filename}"'.encode()],
+                        [b"cache-control", b"no-cache"],
+                        [b"accept-ranges", b"bytes"],
+                    ]
+                    
+                    if content_length:
+                        response_headers.append([b"content-length", content_length.encode()])
+                    
+                    await send({
+                        "type": "http.response.start",
+                        "status": 200,
+                        "headers": response_headers,
+                    })
+                    
+                    # Stream the content
+                    logger.info(f"✅ Streaming content...")
+                    total_bytes = 0
+                    async for chunk in response.aiter_bytes(chunk_size=65536):
+                        if chunk:
+                            total_bytes += len(chunk)
+                            await send({
+                                "type": "http.response.body",
+                                "body": chunk,
+                                "more_body": True,
+                            })
+                    
+                    # Send final empty chunk
+                    await send({
+                        "type": "http.response.body",
+                        "body": b"",
+                        "more_body": False,
+                    })
+                    
+                    logger.info(f"✅ Stream complete: {total_bytes:,} bytes")
+                    
+                    # Clean up
+                    if hasattr(app.state, 'streams') and stream_id in app.state.streams:
+                        del app.state.streams[stream_id]
                         
             except Exception as e:
-                logger.error(f"❌ Stream generator error: {e}")
-                logger.error(f"❌ Error type: {type(e).__name__}")
-                logger.error(f"❌ Platform: {platform}")
-                logger.error(f"❌ Source: {source}")
-                logger.error(f"❌ URL: {video_url[:200] if video_url else 'N/A'}...")
+                logger.error(f"❌ Stream error: {e}")
                 import traceback
-                logger.error(f"❌ Full traceback:\n{traceback.format_exc()}")
-                # Clean up on error
-                if hasattr(app.state, 'streams') and stream_id in app.state.streams:
-                    del app.state.streams[stream_id]
-                raise  # Re-raise to propagate to outer handler
-            except BaseException as be:
-                logger.error(f"❌ Stream generator BaseException: {be}")
-                logger.error(f"❌ BaseException type: {type(be).__name__}")
-                import traceback
-                logger.error(f"❌ Full traceback:\n{traceback.format_exc()}")
-                if hasattr(app.state, 'streams') and stream_id in app.state.streams:
-                    del app.state.streams[stream_id]
-                raise
+                logger.error(f"❌ Traceback:\n{traceback.format_exc()}")
+                try:
+                    await send({
+                        "type": "http.response.start",
+                        "status": 500,
+                        "headers": [[b"content-type", b"text/plain"]],
+                    })
+                    await send({
+                        "type": "http.response.body",
+                        "body": str(e).encode(),
+                    })
+                except:
+                    pass
         
-        # Determine content type based on extension
-        content_type_map = {
-            "mp4": "video/mp4",
-            "mp3": "audio/mpeg",
-            "jpg": "image/jpeg",
-            "jpeg": "image/jpeg",
-            "png": "image/png",
-            "webm": "video/webm",
-            "m4a": "audio/mp4"
-        }
-        content_type = content_type_map.get(ext.lower(), "application/octet-stream")
-        
-        # Create safe filename
-        safe_title = re.sub(r'[^\w\s-]', '', title).strip()[:50]
-        filename = f"{safe_title}.{ext}" if safe_title else f"video.{ext}"
-        
-        logger.info(f"🎬 Returning stream response: {filename} ({content_type})")
-        
-        try:
-            logger.info(f"🎬 Creating Stream object...")
-            
-            # Build headers - DON'T include Content-Length
-            # Let the stream determine it dynamically
-            response_headers = {
-                "Content-Disposition": f'attachment; filename="{filename}"',
-                "Cache-Control": "no-cache",
-                "Accept-Ranges": "bytes"
-            }
-            
-            stream_response = Stream(
-                stream_generator(),
-                media_type=content_type,
-                headers=response_headers
-            )
-            logger.info(f"✅ Stream object created successfully")
-            return stream_response
-        except Exception as stream_error:
-            logger.error(f"❌ Failed to create Stream response: {stream_error}")
-            logger.error(f"❌ Stream error type: {type(stream_error).__name__}")
-            import traceback
-            logger.error(f"❌ Full traceback:\n{traceback.format_exc()}")
-            raise HTTPException(status_code=500, detail=f"Failed to create stream: {str(stream_error)}")
+        return asgi_app
         
     except HTTPException as http_exc:
         logger.error(f"❌ HTTP Exception in stream_proxy: {http_exc.detail}")
@@ -1144,7 +1067,6 @@ async def stream_proxy(stream_id: str) -> Stream:
         import traceback
         logger.error(f"❌ Full traceback:\n{traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=f"Stream proxy error: {str(e)}")
-
 # Create Litestar app
 app = Litestar(
     route_handlers=[index, get_version, download_video, serve_file, stream_proxy]
