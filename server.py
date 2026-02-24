@@ -880,10 +880,14 @@ async def stream_proxy(stream_id: str) -> Stream:
         
         async def stream_generator():
             """Generator that streams video data chunk by chunk"""
+            logger.info(f"🎬 Stream generator started!")
+            
             try:
                 # For TikTok, try to re-extract if URL fails (expired signature)
                 current_url = video_url
                 max_retries = 2
+                
+                logger.info(f"🔄 Starting download with {max_retries} max retries")
                 
                 for attempt in range(max_retries):
                     try:
@@ -1010,15 +1014,22 @@ async def stream_proxy(stream_id: str) -> Stream:
         
         logger.info(f"🎬 Returning stream response: {filename} ({content_type})")
         
-        return Stream(
-            stream_generator(),
-            media_type=content_type,
-            headers={
-                "Content-Disposition": f'attachment; filename="{filename}"',
-                "Cache-Control": "no-cache",
-                "Accept-Ranges": "bytes"
-            }
-        )
+        try:
+            return Stream(
+                stream_generator(),
+                media_type=content_type,
+                headers={
+                    "Content-Disposition": f'attachment; filename="{filename}"',
+                    "Cache-Control": "no-cache",
+                    "Accept-Ranges": "bytes"
+                }
+            )
+        except Exception as stream_error:
+            logger.error(f"❌ Failed to create Stream response: {stream_error}")
+            logger.error(f"❌ Stream error type: {type(stream_error).__name__}")
+            import traceback
+            logger.error(f"❌ Traceback: {traceback.format_exc()}")
+            raise HTTPException(status_code=500, detail=f"Failed to create stream: {str(stream_error)}")
         
     except HTTPException:
         raise
