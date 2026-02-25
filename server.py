@@ -869,51 +869,34 @@ async def serve_file(filename: str) -> File:
 @get("/stream/{stream_id:str}")
 async def stream_proxy(stream_id: str) -> Stream:
     """
-    Stream Proxy Endpoint - Streams video with proper Content-Length
+    Stream Proxy Endpoint - Safely streams video with exact Content-Length for progress bars
     """
     from litestar.response import Stream
     import traceback
+    import time
+    from urllib.parse import parse_qs, urlparse
     
     logger.info(f"🌊 Stream endpoint called for: {stream_id}")
+    
+    # Initialize client outside the try block so we can ensure it closes on failure
+    client = httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=15.0), follow_redirects=True)
     
     try:
         # Get stream data
         if not hasattr(app.state, 'streams'):
-            logger.error(f"❌ App state has no streams attribute")
             raise HTTPException(status_code=500, detail="Server state not initialized")
             
         if stream_id not in app.state.streams:
-            logger.error(f"❌ Stream {stream_id} not found in {list(app.state.streams.keys())}")
             raise HTTPException(status_code=404, detail="Stream not found")
         
         stream_data = app.state.streams[stream_id]
-        logger.info(f"📦 Stream data retrieved: {stream_data.keys()}")
-        
         video_url = stream_data.get("url")
         ext = stream_data.get("ext")
         title = stream_data.get("title")
         platform = stream_data.get("platform")
-        source = stream_data.get("source", "j2")
         original_url = stream_data.get("original_url")
         
-        # Validate all required fields
-        if not video_url:
-            logger.error(f"❌ Missing video URL in stream data")
-            raise HTTPException(status_code=500, detail="Missing video URL")
-        if not ext:
-            logger.error(f"❌ Missing extension in stream data")
-            raise HTTPException(status_code=500, detail="Missing extension")
-        if not title:
-            logger.error(f"❌ Missing title in stream data")
-            raise HTTPException(status_code=500, detail="Missing title")
-        if not platform:
-            logger.error(f"❌ Missing platform in stream data")
-            raise HTTPException(status_code=500, detail="Missing platform")
-        
-        logger.info(f"🌊 Starting stream proxy for {platform}: {stream_id} (via {source})")
-        logger.info(f"📺 Video URL (full): {video_url}")
-        logger.info(f"📺 Extension: {ext}")
-        logger.info(f"📺 Title: {title}")
+        logger.info(f"🌊 Starting stream proxy for {platform}: {stream_id}")
         
         # Determine content type
         content_type_map = {
@@ -922,8 +905,7 @@ async def stream_proxy(stream_id: str) -> Stream:
             "jpg": "image/jpeg",
             "jpeg": "image/jpeg",
             "png": "image/png",
-            "webm": "video/webm",
-            "m4a": "audio/mp4"
+            "webm": "video/webm"
         }
         content_type = content_type_map.get(ext.lower(), "application/octet-stream")
         
@@ -931,108 +913,78 @@ async def stream_proxy(stream_id: str) -> Stream:
         safe_title = re.sub(r'[^\w\s-]', '', title).strip()[:50]
         filename = f"{safe_title}.{ext}" if safe_title else f"video.{ext}"
         
-        # Get Content-Length first with a HEAD request to the actual video URL
-        content_length_header = None
-        try:
-            current_url = video_url
-            
-            # Check URL expiry for TikTok before HEAD request
-            if platform == "tiktok" and "x-expires=" in current_url:
-                import time
-                from urllib.parse import parse_qs, urlparse
-                
-                try:
-                    parsed = urlparse(current_url)
-                    params = parse_qs(parsed.query)
-                    expires_timestamp = int(params.get('x-expires', [0])[0])
-                    current_timestamp = int(time.time())
-                    
-                    if current_timestamp >= expires_timestamp:
-                        logger.warning(f"⚠️ URL expired, re-extracting...")
-                        if original_url:
-                            j2 = AsyncJ2Extractor()
-                            fresh_result = await j2.extract_download_url(original_url)
-                            if fresh_result and fresh_result.get("url"):
-                                current_url = fresh_result["url"]
-                                # Update stored URL
-                                stream_data["url"] = current_url
-                                logger.info(f"✅ Got fresh URL")
-                except Exception as e:
-                    logger.warning(f"⚠️ Expiry check failed: {e}")
-            
-            # Make HEAD request to get Content-Length from actual video URL
-            async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
-                head_response = await client.head(current_url, headers={"User-Agent": EXACT_UA})
-                if head_response.status_code in [200, 206]:
-                    content_length_header = head_response.headers.get("content-length")
-                    if content_length_header:
-                        logger.info(f"📏 Pre-fetched Content-Length: {content_length_header} bytes")
-        except Exception as e:
-            logger.warning(f"⚠️ Failed to get Content-Length: {e}")
+        current_url = stream_data.get("url", video_url)
         
-        # Stream generator
-        async def stream_with_length():
+        # Check URL expiry for TikTok before streaming
+        if platform == "tiktok" and "x-expires=" in current_url:
             try:
-                current_url = stream_data.get("url", video_url)  # Use updated URL if re-extracted
+                parsed = urlparse(current_url)
+                params = parse_qs(parsed.query)
+                expires_timestamp = int(params.get('x-expires', [0])[0])
                 
-                # Make the request
-                headers_to_use = {"User-Agent": EXACT_UA, "Accept": "*/*"}
-                
-                async with httpx.AsyncClient(
-                    timeout=httpx.Timeout(120.0, connect=15.0),
-                    follow_redirects=True
-                ) as client:
-                    response = await client.get(current_url, headers=headers_to_use)
-                    
-                    if response.status_code not in [200, 206]:
-                        logger.error(f"❌ HTTP {response.status_code}")
-                        raise HTTPException(status_code=500, detail=f"Failed to fetch: {response.status_code}")
-                    
-                    # Stream the content
-                    logger.info(f"✅ Streaming content...")
-                    total_bytes = 0
-                    async for chunk in response.aiter_bytes(chunk_size=65536):
-                        if chunk:
-                            total_bytes += len(chunk)
-                            yield chunk
-                    
-                    logger.info(f"✅ Stream complete: {total_bytes:,} bytes")
-                    
-                    # Clean up
-                    if hasattr(app.state, 'streams') and stream_id in app.state.streams:
-                        del app.state.streams[stream_id]
-                        
+                if int(time.time()) >= expires_timestamp:
+                    logger.warning(f"⚠️ URL expired, re-extracting...")
+                    if original_url:
+                        j2 = AsyncJ2Extractor()
+                        fresh_result = await j2.extract_download_url(original_url)
+                        if fresh_result and fresh_result.get("url"):
+                            current_url = fresh_result["url"]
+                            stream_data["url"] = current_url
             except Exception as e:
-                logger.error(f"❌ Stream error: {e}")
-                import traceback
-                logger.error(f"❌ Traceback:\n{traceback.format_exc()}")
-                raise
+                logger.warning(f"⚠️ Expiry check failed: {e}")
         
-        # Build headers with Content-Length if available
+        # 1. Start the GET request in streaming mode (DO NOT use a context manager here)
+        req = client.build_request("GET", current_url, headers={"User-Agent": EXACT_UA, "Accept": "*/*"})
+        response = await client.send(req, stream=True)
+        
+        if response.status_code not in [200, 206]:
+            await response.aclose()
+            await client.aclose()
+            logger.error(f"❌ HTTP {response.status_code} from media server")
+            raise HTTPException(status_code=500, detail=f"Failed to fetch: {response.status_code}")
+        
+        # 2. Extract the exact Content-Length directly from the GET response
+        exact_content_length = response.headers.get("Content-Length")
+        logger.info(f"📏 Exact Content-Length extracted: {exact_content_length} bytes")
+        
+        # 3. Create the generator that will yield chunks and handle cleanup
+        async def stream_generator():
+            try:
+                logger.info("✅ Streaming content...")
+                async for chunk in response.aiter_bytes(chunk_size=65536):
+                    yield chunk
+            except Exception as e:
+                logger.error(f"❌ Stream interrupted: {e}")
+            finally:
+                # Crucial: Clean up HTTPX resources when the stream ends or client disconnects
+                await response.aclose()
+                await client.aclose()
+                if hasattr(app.state, 'streams') and stream_id in app.state.streams:
+                    del app.state.streams[stream_id]
+                logger.info(f"🧹 Cleaned up stream {stream_id}")
+        
+        # 4. Build headers and pass them to Litestar
         response_headers = {
             "Content-Disposition": f'attachment; filename="{filename}"',
             "Cache-Control": "no-cache"
         }
         
-        if content_length_header:
-            response_headers["Content-Length"] = content_length_header
-            logger.info(f"✅ Including Content-Length in response: {content_length_header}")
+        if exact_content_length:
+            response_headers["Content-Length"] = exact_content_length
         
-        # Return Stream response
         return Stream(
-            stream_with_length(),
+            stream_generator(),
             media_type=content_type,
             headers=response_headers
         )
         
-    except HTTPException as http_exc:
-        logger.error(f"❌ HTTP Exception in stream_proxy: {http_exc.detail}")
+    except HTTPException:
+        await client.aclose()
         raise
     except Exception as e:
-        logger.error(f"❌ Stream proxy error: {e}")
-        import traceback
-        logger.error(f"❌ Traceback:\n{traceback.format_exc()}")
-        raise HTTPException(status_code=500, detail=f"Stream proxy error: {str(e)}")
+        await client.aclose()
+        logger.error(f"❌ Stream proxy error: {e}\n{traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 # Create Litestar app
 app = Litestar(
