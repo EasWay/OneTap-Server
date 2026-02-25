@@ -931,32 +931,49 @@ async def stream_proxy(stream_id: str) -> Stream:
         safe_title = re.sub(r'[^\w\s-]', '', title).strip()[:50]
         filename = f"{safe_title}.{ext}" if safe_title else f"video.{ext}"
         
-        # Stream generator with Content-Length from response
+        # Get Content-Length first with a HEAD request to the actual video URL
+        content_length_header = None
+        try:
+            current_url = video_url
+            
+            # Check URL expiry for TikTok before HEAD request
+            if platform == "tiktok" and "x-expires=" in current_url:
+                import time
+                from urllib.parse import parse_qs, urlparse
+                
+                try:
+                    parsed = urlparse(current_url)
+                    params = parse_qs(parsed.query)
+                    expires_timestamp = int(params.get('x-expires', [0])[0])
+                    current_timestamp = int(time.time())
+                    
+                    if current_timestamp >= expires_timestamp:
+                        logger.warning(f"⚠️ URL expired, re-extracting...")
+                        if original_url:
+                            j2 = AsyncJ2Extractor()
+                            fresh_result = await j2.extract_download_url(original_url)
+                            if fresh_result and fresh_result.get("url"):
+                                current_url = fresh_result["url"]
+                                # Update stored URL
+                                stream_data["url"] = current_url
+                                logger.info(f"✅ Got fresh URL")
+                except Exception as e:
+                    logger.warning(f"⚠️ Expiry check failed: {e}")
+            
+            # Make HEAD request to get Content-Length from actual video URL
+            async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
+                head_response = await client.head(current_url, headers={"User-Agent": EXACT_UA})
+                if head_response.status_code in [200, 206]:
+                    content_length_header = head_response.headers.get("content-length")
+                    if content_length_header:
+                        logger.info(f"📏 Pre-fetched Content-Length: {content_length_header} bytes")
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to get Content-Length: {e}")
+        
+        # Stream generator
         async def stream_with_length():
             try:
-                current_url = video_url
-                
-                # Check URL expiry for TikTok
-                if platform == "tiktok" and "x-expires=" in current_url:
-                    import time
-                    from urllib.parse import parse_qs, urlparse
-                    
-                    try:
-                        parsed = urlparse(current_url)
-                        params = parse_qs(parsed.query)
-                        expires_timestamp = int(params.get('x-expires', [0])[0])
-                        current_timestamp = int(time.time())
-                        
-                        if current_timestamp >= expires_timestamp:
-                            logger.error(f"❌ URL EXPIRED! Re-extracting...")
-                            if original_url:
-                                j2 = AsyncJ2Extractor()
-                                fresh_result = await j2.extract_download_url(original_url)
-                                if fresh_result and fresh_result.get("url"):
-                                    current_url = fresh_result["url"]
-                                    logger.info(f"✅ Got fresh URL")
-                    except Exception as e:
-                        logger.warning(f"⚠️ Expiry check failed: {e}")
+                current_url = stream_data.get("url", video_url)  # Use updated URL if re-extracted
                 
                 # Make the request
                 headers_to_use = {"User-Agent": EXACT_UA, "Accept": "*/*"}
@@ -970,11 +987,6 @@ async def stream_proxy(stream_id: str) -> Stream:
                     if response.status_code not in [200, 206]:
                         logger.error(f"❌ HTTP {response.status_code}")
                         raise HTTPException(status_code=500, detail=f"Failed to fetch: {response.status_code}")
-                    
-                    # Get content length
-                    content_length = response.headers.get("content-length")
-                    if content_length:
-                        logger.info(f"📏 Content-Length: {content_length} bytes")
                     
                     # Stream the content
                     logger.info(f"✅ Streaming content...")
@@ -996,14 +1008,21 @@ async def stream_proxy(stream_id: str) -> Stream:
                 logger.error(f"❌ Traceback:\n{traceback.format_exc()}")
                 raise
         
+        # Build headers with Content-Length if available
+        response_headers = {
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Cache-Control": "no-cache"
+        }
+        
+        if content_length_header:
+            response_headers["Content-Length"] = content_length_header
+            logger.info(f"✅ Including Content-Length in response: {content_length_header}")
+        
         # Return Stream response
         return Stream(
             stream_with_length(),
             media_type=content_type,
-            headers={
-                "Content-Disposition": f'attachment; filename="{filename}"',
-                "Cache-Control": "no-cache"
-            }
+            headers=response_headers
         )
         
     except HTTPException as http_exc:
