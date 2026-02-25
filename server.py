@@ -867,19 +867,11 @@ async def serve_file(filename: str) -> File:
     return File(file_path, filename=filename)
 
 @get("/stream/{stream_id:str}")
-async def stream_proxy(stream_id: str) -> Any:
+async def stream_proxy(stream_id: str) -> Stream:
     """
-    Stream Proxy Endpoint - The Cobalt Way
-    
-    This endpoint acts as a tunnel between the client and the video source.
-    The client never talks directly to YouTube/TikTok - only to this server.
-    This prevents 403 errors caused by signature validation failures.
-    
-    For TikTok, we re-extract fresh URLs to avoid expiration issues.
-    
-    Returns a raw ASGI response to have full control over headers.
+    Stream Proxy Endpoint - Streams video with proper Content-Length
     """
-    from litestar.types import Receive, Scope, Send
+    from litestar.response import Stream
     import traceback
     
     logger.info(f"🌊 Stream endpoint called for: {stream_id}")
@@ -939,10 +931,9 @@ async def stream_proxy(stream_id: str) -> Any:
         safe_title = re.sub(r'[^\w\s-]', '', title).strip()[:50]
         filename = f"{safe_title}.{ext}" if safe_title else f"video.{ext}"
         
-        # Custom ASGI app that streams with proper Content-Length
-        async def asgi_app(scope: Scope, receive: Receive, send: Send):
+        # Stream generator with Content-Length from response
+        async def stream_with_length():
             try:
-                # Start with the original video URL
                 current_url = video_url
                 
                 # Check URL expiry for TikTok
@@ -956,9 +947,6 @@ async def stream_proxy(stream_id: str) -> Any:
                         expires_timestamp = int(params.get('x-expires', [0])[0])
                         current_timestamp = int(time.time())
                         
-                        logger.info(f"⏰ URL expires at: {expires_timestamp}")
-                        logger.info(f"⏰ Current time: {current_timestamp}")
-                        
                         if current_timestamp >= expires_timestamp:
                             logger.error(f"❌ URL EXPIRED! Re-extracting...")
                             if original_url:
@@ -971,48 +959,22 @@ async def stream_proxy(stream_id: str) -> Any:
                         logger.warning(f"⚠️ Expiry check failed: {e}")
                 
                 # Make the request
-                headers_to_use = {"User-Agent": EXACT_UA, "Accept": "*/*", "Connection": "keep-alive"}
+                headers_to_use = {"User-Agent": EXACT_UA, "Accept": "*/*"}
                 
                 async with httpx.AsyncClient(
                     timeout=httpx.Timeout(120.0, connect=15.0),
-                    follow_redirects=True,
-                    limits=httpx.Limits(max_keepalive_connections=10, max_connections=20)
+                    follow_redirects=True
                 ) as client:
                     response = await client.get(current_url, headers=headers_to_use)
                     
                     if response.status_code not in [200, 206]:
                         logger.error(f"❌ HTTP {response.status_code}")
-                        await send({
-                            "type": "http.response.start",
-                            "status": 500,
-                            "headers": [[b"content-type", b"text/plain"]],
-                        })
-                        await send({
-                            "type": "http.response.body",
-                            "body": b"Failed to fetch video",
-                        })
-                        return
+                        raise HTTPException(status_code=500, detail=f"Failed to fetch: {response.status_code}")
                     
-                    # Get content length from actual response
+                    # Get content length
                     content_length = response.headers.get("content-length")
-                    logger.info(f"📏 Content-Length: {content_length}")
-                    
-                    # Send response headers with correct Content-Length
-                    response_headers = [
-                        [b"content-type", content_type.encode()],
-                        [b"content-disposition", f'attachment; filename="{filename}"'.encode()],
-                        [b"cache-control", b"no-cache"],
-                        [b"accept-ranges", b"bytes"],
-                    ]
-                    
                     if content_length:
-                        response_headers.append([b"content-length", content_length.encode()])
-                    
-                    await send({
-                        "type": "http.response.start",
-                        "status": 200,
-                        "headers": response_headers,
-                    })
+                        logger.info(f"📏 Content-Length: {content_length} bytes")
                     
                     # Stream the content
                     logger.info(f"✅ Streaming content...")
@@ -1020,18 +982,7 @@ async def stream_proxy(stream_id: str) -> Any:
                     async for chunk in response.aiter_bytes(chunk_size=65536):
                         if chunk:
                             total_bytes += len(chunk)
-                            await send({
-                                "type": "http.response.body",
-                                "body": chunk,
-                                "more_body": True,
-                            })
-                    
-                    # Send final empty chunk
-                    await send({
-                        "type": "http.response.body",
-                        "body": b"",
-                        "more_body": False,
-                    })
+                            yield chunk
                     
                     logger.info(f"✅ Stream complete: {total_bytes:,} bytes")
                     
@@ -1043,30 +994,27 @@ async def stream_proxy(stream_id: str) -> Any:
                 logger.error(f"❌ Stream error: {e}")
                 import traceback
                 logger.error(f"❌ Traceback:\n{traceback.format_exc()}")
-                try:
-                    await send({
-                        "type": "http.response.start",
-                        "status": 500,
-                        "headers": [[b"content-type", b"text/plain"]],
-                    })
-                    await send({
-                        "type": "http.response.body",
-                        "body": str(e).encode(),
-                    })
-                except:
-                    pass
+                raise
         
-        return asgi_app
+        # Return Stream response
+        return Stream(
+            stream_with_length(),
+            media_type=content_type,
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"',
+                "Cache-Control": "no-cache"
+            }
+        )
         
     except HTTPException as http_exc:
         logger.error(f"❌ HTTP Exception in stream_proxy: {http_exc.detail}")
         raise
     except Exception as e:
         logger.error(f"❌ Stream proxy error: {e}")
-        logger.error(f"❌ Error type: {type(e).__name__}")
         import traceback
-        logger.error(f"❌ Full traceback:\n{traceback.format_exc()}")
+        logger.error(f"❌ Traceback:\n{traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=f"Stream proxy error: {str(e)}")
+
 # Create Litestar app
 app = Litestar(
     route_handlers=[index, get_version, download_video, serve_file, stream_proxy]
