@@ -802,9 +802,9 @@ async def download_video(data: DownloadRequest) -> DownloadResponse:
         title = extraction_result.get("title", "video")
         direct_url = extraction_result["url"]
         
-        # TikTok images: Send direct URL (they're more stable than videos)
-        if platform == "tiktok" and ext.lower() in ["jpg", "jpeg", "png", "webp"]:
-            logger.info(f"📸 TikTok image detected - sending direct URL")
+        # TikTok & Instagram images: Send direct URL (they're more stable than videos)
+        if platform in ["tiktok", "instagram"] and ext.lower() in ["jpg", "jpeg", "png", "webp"]:
+            logger.info(f"📸 {platform.capitalize()} image detected - sending direct URL")
             logger.info(f"🔗 Direct URL: {direct_url}")
             
             return DownloadResponse(
@@ -909,8 +909,12 @@ async def stream_proxy(stream_id: str) -> Stream:
         }
         content_type = content_type_map.get(ext.lower(), "application/octet-stream")
         
-        # Create safe filename
-        safe_title = re.sub(r'[^\w\s-]', '', title).strip()[:50]
+        # Create safe filename - remove newlines, emojis, and other illegal characters
+        safe_title = title.replace('\n', ' ').replace('\r', ' ')
+        # Remove emojis and non-ASCII characters
+        safe_title = re.sub(r'[^\x00-\x7F]+', '', safe_title)
+        # Remove any remaining special characters except spaces and hyphens
+        safe_title = re.sub(r'[^\w\s-]', '', safe_title).strip()[:50]
         filename = f"{safe_title}.{ext}" if safe_title else f"video.{ext}"
         
         current_url = stream_data.get("url", video_url)
