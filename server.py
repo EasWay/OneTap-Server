@@ -438,6 +438,8 @@ class AsyncJ2Extractor:
                 
                 # Deep Token Extraction - Priority 1: Cookies
                 csrf_token = home_resp.cookies.get("csrf_token")
+                if csrf_token:
+                    logger.info("✅ Found CSRF token in Cookies")
                 
                 # Priority 2: HTML Meta Tags
                 if not csrf_token:
@@ -447,12 +449,21 @@ class AsyncJ2Extractor:
                         csrf_token = meta_match.group(1)
                         logger.info("✅ Found CSRF token in Meta Tag")
                 
-                # Priority 3: JavaScript Variables
+                # Priority 3: JavaScript Variables (multiple patterns)
                 if not csrf_token:
-                    js_match = re.search(r'csrf_token\s*=\s*["\']([^"\']+)["\']', home_resp.text)
-                    if js_match:
-                        csrf_token = js_match.group(1)
-                        logger.info("✅ Found CSRF token in JS")
+                    patterns = [
+                        r'csrf_token\s*=\s*["\']([^"\']+)["\']',
+                        r'csrfToken\s*=\s*["\']([^"\']+)["\']',
+                        r'CSRF_TOKEN\s*=\s*["\']([^"\']+)["\']',
+                        r'window\.csrf\s*=\s*["\']([^"\']+)["\']',
+                        r'window\.csrfToken\s*=\s*["\']([^"\']+)["\']'
+                    ]
+                    for pattern in patterns:
+                        js_match = re.search(pattern, home_resp.text)
+                        if js_match:
+                            csrf_token = js_match.group(1)
+                            logger.info(f"✅ Found CSRF token in JS with pattern: {pattern}")
+                            break
                 
                 # Priority 4: Laravel Token Pattern
                 if not csrf_token:
@@ -468,11 +479,22 @@ class AsyncJ2Extractor:
                         csrf_token = xsrf_match.group(1)
                         logger.info("✅ Found XSRF token")
                 
-                if not csrf_token: 
-                    logger.warning("⚠️ No CSRF token found after deep search")
-                    return None
+                # Priority 6: Hidden input fields
+                if not csrf_token:
+                    input_match = re.search(r'<input[^>]*name=["\'](?:csrf_token|_token|csrfToken)["\'][^>]*value=["\']([^"\']+)["\']', home_resp.text, re.IGNORECASE)
+                    if input_match:
+                        csrf_token = input_match.group(1)
+                        logger.info("✅ Found CSRF token in hidden input")
                 
-                logger.info(f"✅ CSRF token acquired: {csrf_token[:10]}...")
+                # Priority 7: Try without CSRF token (some APIs don't require it)
+                if not csrf_token:
+                    logger.warning("⚠️ No CSRF token found after deep search - attempting without token")
+                    csrf_token = ""  # Empty string instead of None to continue
+                
+                if csrf_token:
+                    logger.info(f"✅ CSRF token acquired: {csrf_token[:10]}...")
+                else:
+                    logger.info("⚠️ Proceeding without CSRF token")
                 
                 # Step 2: Switch to XHR headers for API call
                 xhr_headers = {
@@ -484,9 +506,12 @@ class AsyncJ2Extractor:
                     "Sec-Fetch-Dest": "empty",
                     "Sec-Fetch-Mode": "cors",
                     "Sec-Fetch-Site": "same-origin",
-                    "x-csrf-token": csrf_token,
                     "X-Requested-With": "XMLHttpRequest"
                 }
+                
+                # Only add CSRF token header if we found one
+                if csrf_token:
+                    xhr_headers["x-csrf-token"] = csrf_token
                 
                 payload = {
                     "data": {
