@@ -606,9 +606,13 @@ class AsyncJ2Extractor:
                         }
                     else:
                         # Single media item
+                        # Smart extension fallback based on type
+                        media_type = best_media.get("type", "video")
+                        default_ext = "jpg" if media_type == "image" else "mp4"
+                        
                         return {
                             "url": best_media.get("url"),
-                            "ext": best_media.get("extension", "mp4"),
+                            "ext": best_media.get("extension", best_media.get("ext", default_ext)),
                             "title": data.get("title", "video")
                         }
                 else:
@@ -623,10 +627,11 @@ class AsyncJ2Extractor:
 async def get_version() -> Dict[str, Any]:
     """Version endpoint for system updates"""
     return {
-        "version": "1.7",
-        "latest_version": 7,  # Version code for comparison
-        "apk_url": "https://github.com/YourUsername/OneTap/releases/download/v1.7/OneTap_v1.7.apk",
-        "release_notes": "🚀 OneTap v1.7 - Simplified & Optimized\n\n✨ New Features:\n• Unified J2Download extraction for all platforms\n• Fixed YouTube URL truncation issues\n• Improved URL processing and validation\n• Enhanced stream proxy for all platforms\n\n🔧 Performance Improvements:\n• Simplified extraction strategy (removed complexity)\n• Better YouTube parameter preservation\n• Smarter URL cleaning that preserves essential data\n• Optimized for reliability over speed\n\n🐛 Bug Fixes:\n• Fixed YouTube regular video URLs being truncated\n• Improved URL expansion and cleaning logic\n• Better error handling for malformed URLs\n• Enhanced compatibility with all YouTube URL formats",
+        "version": "1.8",
+        "latest_version": 10,  # Version code for comparison (higher than 8 to trigger update)
+        "apk_url": "https://github.com/YourUsername/OneTap/releases/download/v1.8/OneTap_v1.8.apk",
+        "play_store_url": "https://play.google.com/store/apps/details?id=com.tapstream.downloader",
+        "release_notes": "🚀 OneTap v1.8 - Play Store Release!\n\n✨ New Features:\n• Now available on Google Play Store!\n• Fixed LinkedIn image download extension bug\n• Improved stream proxy for social media platforms\n• Enhanced download progress tracking reliability\n• General performance optimizations and stability fixes",
         "status": "online",
         "service": "Universal Media Downloader - ASYNC EDITION",
         "framework": "Litestar (ASGI)",
