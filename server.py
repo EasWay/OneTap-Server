@@ -535,9 +535,14 @@ class AsyncJ2Extractor:
                     "X-Requested-With": "XMLHttpRequest"
                 }
                 
-                # Only add CSRF token header if we found one
+                # Handle JWT vs standard CSRF token
                 if csrf_token:
-                    xhr_headers["x-csrf-token"] = csrf_token
+                    if csrf_token.startswith("eyJ"):
+                        xhr_headers["authorization"] = f"Bearer {csrf_token}"
+                        logger.info("🎟️ Using JWT-based Authorization header")
+                    else:
+                        xhr_headers["x-csrf-token"] = csrf_token
+                        logger.info("🎟️ Using standard x-csrf-token header")
                 
                 payload = {
                     "data": {
