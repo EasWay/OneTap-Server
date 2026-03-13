@@ -37,6 +37,9 @@ J2_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, li
 # --- PYDANTIC MODELS ---
 class DownloadRequest(BaseModel):
     url: str
+    csrf_token: Optional[str] = None
+    cookie_string: Optional[str] = None
+    user_agent: Optional[str] = None
     
     @field_validator('url')
     @classmethod
@@ -407,7 +410,13 @@ class J2ResponseParser:
 
 
 class AsyncJ2Extractor:
-    async def extract_download_url(self, video_url: str) -> Optional[Dict[str, Any]]:
+    async def extract_download_url(
+        self, 
+        video_url: str, 
+        provided_token: Optional[str] = None,
+        provided_cookies: Optional[str] = None,
+        provided_ua: Optional[str] = None
+    ) -> Optional[Dict[str, Any]]:
         try:
             platform = detect_platform(video_url)
             logger.info(f"🎯 J2 Extraction for {platform}: {video_url}")
@@ -428,21 +437,37 @@ class AsyncJ2Extractor:
                     "Upgrade-Insecure-Requests": "1"
                 }
                 
-                # Handshake with navigation headers
-                logger.info("🤝 Performing J2Download handshake...")
-                home_resp = await client.get(J2_BASE_URL, headers=nav_headers)
+                # Handshake logic (only if token not provided)
+                csrf_token = provided_token
+                cookies_to_use = {}
                 
-                if home_resp.status_code != 200:
-                    logger.warning(f"⚠️ Handshake returned status {home_resp.status_code}")
-                    return None
-                
-                # Deep Token Extraction - Priority 1: Cookies
-                csrf_token = home_resp.cookies.get("csrf_token")
-                if csrf_token:
-                    logger.info("✅ Found CSRF token in Cookies")
-                
-                # Priority 2: HTML Meta Tags
+                if provided_cookies:
+                    # Parse simplified cookie string: "name1=value1; name2=value2"
+                    for cookie in provided_cookies.split(';'):
+                        if '=' in cookie:
+                            name, value = cookie.strip().split('=', 1)
+                            cookies_to_use[name] = value
+                    logger.info("✅ Using client-provided session cookies")
+
                 if not csrf_token:
+                    logger.info("🤝 Performing J2Download handshake...")
+                    home_resp = await client.get(J2_BASE_URL, headers=nav_headers)
+                    
+                    if home_resp.status_code != 200:
+                        logger.warning(f"⚠️ Handshake returned status {home_resp.status_code}")
+                        return None
+                    
+                    cookies_to_use = home_resp.cookies
+                    
+                    # Deep Token Extraction - Priority 1: Cookies
+                    csrf_token = home_resp.cookies.get("csrf_token")
+                    if csrf_token:
+                        logger.info("✅ Found CSRF token in Cookies")
+                else:
+                    logger.info("✅ Using client-provided CSRF token")
+                
+                # Priority 2: HTML Meta Tags (only if handshake was performed)
+                if not csrf_token and 'home_resp' in locals():
                     logger.info("🔍 Searching HTML for CSRF token...")
                     meta_match = re.search(r'<meta\s+name="csrf-token"\s+content="([^"]+)"', home_resp.text)
                     if meta_match:
@@ -497,8 +522,9 @@ class AsyncJ2Extractor:
                     logger.info("⚠️ Proceeding without CSRF token")
                 
                 # Step 2: Switch to XHR headers for API call
+                ua_to_use = provided_ua if provided_ua else J2_UA
                 xhr_headers = {
-                    "User-Agent": J2_UA,
+                    "User-Agent": ua_to_use,
                     "Referer": f"{J2_BASE_URL}/",
                     "Origin": J2_BASE_URL,
                     "Content-Type": "application/json",
@@ -520,13 +546,19 @@ class AsyncJ2Extractor:
                     }
                 }
                 
-                logger.info(f"🚀 Sending J2Download API request...")
+                logger.info(f"🚀 Sending J2Download API request with UA: {ua_to_use[:50]}...")
                 logger.info(f"📤 Payload: {payload}")
                 
-                response = await client.post(J2_API_URL, json=payload, headers=xhr_headers, cookies=home_resp.cookies)
+                response = await client.post(J2_API_URL, json=payload, headers=xhr_headers, cookies=cookies_to_use)
                 
                 logger.info(f"📥 Response status: {response.status_code}")
                 
+                if response.status_code in [401, 403]:
+                    logger.error(f"❌ J2Download API Auth error (Turnstile block?): {response.status_code}")
+                    if provided_token:
+                        return {"error": "SESSION_EXPIRED", "message": "The captured session is invalid or expired."}
+                    return None
+
                 if response.status_code != 200:
                     logger.error(f"❌ J2Download API HTTP error: {response.status_code}")
                     try:
@@ -736,8 +768,17 @@ async def download_video(data: DownloadRequest) -> DownloadResponse:
         
         logger.info(f"🎯 {platform} detected - using J2Download")
         j2 = AsyncJ2Extractor()
-        extraction_result = await j2.extract_download_url(url)
+        extraction_result = await j2.extract_download_url(
+            url, 
+            provided_token=data.csrf_token,
+            provided_cookies=data.cookie_string,
+            provided_ua=data.user_agent
+        )
         
+        # Check for SESSION_EXPIRED special case
+        if isinstance(extraction_result, dict) and extraction_result.get("error") == "SESSION_EXPIRED":
+             raise HTTPException(status_code=401, detail="SESSION_EXPIRED")
+
         if not extraction_result:
             raise HTTPException(status_code=400, detail="All extraction methods failed")
         
