@@ -69,6 +69,7 @@ class DownloadResponse(BaseModel):
     files: Optional[List[Dict[str, Any]]] = None
     title: Optional[str] = None
     platform: Optional[str] = None
+    size: Optional[int] = None
 
 def remove_query_params(url: str) -> str:
     """Removes tracking parameters but preserves essential YouTube parameters"""
@@ -802,11 +803,23 @@ async def download_video(data: DownloadRequest) -> DownloadResponse:
             
             # Store stream data for proxying
             stream_id = uid
+            
+            # Pre-fetch content length for YouTube as well
+            content_length = None
+            try:
+                async with httpx.AsyncClient(timeout=5.0) as head_client:
+                    head_resp = await head_client.head(direct_url, headers={"User-Agent": EXACT_UA}, follow_redirects=True)
+                    if head_resp.status_code == 200:
+                        content_length = int(head_resp.headers.get("Content-Length", 0))
+            except:
+                logger.warning(f"⚠️ Failed to pre-fetch Content-Length for YouTube {stream_id}")
+
             stream_data = {
                 "url": direct_url,
                 "ext": ext,
                 "title": title,
                 "platform": platform,
+                "size": content_length,
                 "source": extraction_result.get("source", "j2")
             }
             
@@ -814,7 +827,7 @@ async def download_video(data: DownloadRequest) -> DownloadResponse:
                 app.state.streams = {}
             app.state.streams[stream_id] = stream_data
             
-            logger.info(f"✅ YouTube: Stream proxy ready for {stream_id}")
+            logger.info(f"✅ YouTube: Stream proxy ready for {stream_id} (Size: {content_length})")
             
             return DownloadResponse(
                 status="success",
@@ -822,7 +835,8 @@ async def download_video(data: DownloadRequest) -> DownloadResponse:
                 filename=f"{title}.{ext}",
                 message="Stream proxy ready",
                 title=title,
-                platform=platform
+                platform=platform,
+                size=content_length
             )
         
         # Check if it's a multi-image post (like TikTok photo slideshow)
@@ -890,29 +904,34 @@ async def download_video(data: DownloadRequest) -> DownloadResponse:
         # All other platforms: Use stream proxy approach
         # Store the direct URL and metadata for streaming
         stream_id = uid
+        
+        # Pre-fetch content length if possible
+        content_length = None
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as head_client:
+                head_resp = await head_client.head(direct_url, headers={"User-Agent": EXACT_UA}, follow_redirects=True)
+                if head_resp.status_code == 200:
+                    content_length = int(head_resp.headers.get("Content-Length", 0))
+        except:
+            logger.warning(f"⚠️ Failed to pre-fetch Content-Length for {stream_id}")
+
         stream_data = {
             "url": direct_url,
             "ext": ext,
             "title": title,
             "platform": platform,
             "source": source,
-            "original_url": url  # Store original URL for re-extraction if needed
+            "size": content_length,
+            "original_url": url
         }
         
-        logger.info(f"📦 Storing stream data for {stream_id}:")
-        logger.info(f"   - URL: {direct_url[:100]}...")
-        logger.info(f"   - Extension: {ext}")
-        logger.info(f"   - Title: {title}")
-        logger.info(f"   - Platform: {platform}")
-        logger.info(f"   - Source: {source}")
-        logger.info(f"   - Original URL: {url[:100]}...")
+        # ... (logging)
         
-        # Store stream data in memory (in production, use Redis or database)
         if not hasattr(app.state, 'streams'):
             app.state.streams = {}
         app.state.streams[stream_id] = stream_data
         
-        logger.info(f"✅ {platform}: Stream proxy ready for {stream_id} (via {source})")
+        logger.info(f"✅ {platform}: Stream proxy ready for {stream_id} (Size: {content_length})")
         
         return DownloadResponse(
             status="success",
@@ -920,7 +939,8 @@ async def download_video(data: DownloadRequest) -> DownloadResponse:
             filename=f"{title}.{ext}",
             message="Stream proxy ready",
             title=title,
-            platform=platform
+            platform=platform,
+            size=content_length
         )
         
     except HTTPException:
@@ -991,15 +1011,7 @@ async def stream_proxy(stream_id: str) -> Stream:
         current_url = stream_data.get("url", video_url)
         
         # J2Download Platforms (Tiktok, Instagram, Facebook)
-        # Client-side extraction is now preferred for these due to fingerprint-bound JWTs
-        if platform in ["tiktok", "instagram", "facebook"]:
-            logger.info(f"🎯 {platform} detected - client-side extraction requested")
-            return {
-                "status": "success",
-                "platform": platform,
-                "type": "video",
-                "message": "Direct client-side extraction enabled"
-            }
+        # We now allow the server to proxy these as requested by the user flow.
         
         # Original J2 logic as fallback
         # Check URL expiry for TikTok before streaming
