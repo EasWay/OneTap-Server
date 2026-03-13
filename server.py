@@ -990,6 +990,18 @@ async def stream_proxy(stream_id: str) -> Stream:
         
         current_url = stream_data.get("url", video_url)
         
+        # J2Download Platforms (Tiktok, Instagram, Facebook)
+        # Client-side extraction is now preferred for these due to fingerprint-bound JWTs
+        if platform in ["tiktok", "instagram", "facebook"]:
+            logger.info(f"🎯 {platform} detected - client-side extraction requested")
+            return {
+                "status": "success",
+                "platform": platform,
+                "type": "video",
+                "message": "Direct client-side extraction enabled"
+            }
+        
+        # Original J2 logic as fallback
         # Check URL expiry for TikTok before streaming
         if platform == "tiktok" and "x-expires=" in current_url:
             try:
