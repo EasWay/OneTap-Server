@@ -516,10 +516,10 @@ class AsyncJ2Extractor:
                     logger.warning("⚠️ No CSRF token found after deep search - attempting without token")
                     csrf_token = ""  # Empty string instead of None to continue
                 
-                if csrf_token:
+                if (csrf_token):
                     logger.info(f"✅ CSRF token acquired: {csrf_token[:10]}...")
                 else:
-                    logger.info("⚠️ Proceeding without CSRF token")
+                    logger.info("ℹ️ No CSRF token provided (using session cookies only)")
                 
                 # Step 2: Switch to XHR headers for API call
                 ua_to_use = provided_ua if provided_ua else J2_UA
