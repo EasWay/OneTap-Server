@@ -609,11 +609,12 @@ class AsyncJ2Extractor:
                         # Smart extension fallback based on type
                         media_type = best_media.get("type", "video")
                         default_ext = "jpg" if media_type == "image" else "mp4"
-                        
+
                         return {
                             "url": best_media.get("url"),
                             "ext": best_media.get("extension", best_media.get("ext", default_ext)),
-                            "title": data.get("title", "video")
+                            "title": data.get("title", "video"),
+                            "size": best_media.get("size") or best_media.get("filesize")
                         }
                 else:
                     logger.warning("⚠️ J2Download: No suitable media found in response")
@@ -910,15 +911,21 @@ async def download_video(data: DownloadRequest) -> DownloadResponse:
         # Store the direct URL and metadata for streaming
         stream_id = uid
         
-        # Pre-fetch content length if possible
+        # Pre-fetch content length if possible.
+        # TikTok's tt_chain_token is single-use: a HEAD request consumes the token,
+        # causing the subsequent GET in /stream to receive 404. Skip HEAD for these URLs.
         content_length = None
-        try:
-            async with httpx.AsyncClient(timeout=5.0) as head_client:
-                head_resp = await head_client.head(direct_url, headers={"User-Agent": EXACT_UA}, follow_redirects=True)
-                if head_resp.status_code == 200:
-                    content_length = int(head_resp.headers.get("Content-Length", 0))
-        except:
-            logger.warning(f"⚠️ Failed to pre-fetch Content-Length for {stream_id}")
+        if platform == "tiktok" or "tt_chain_token" in direct_url:
+            content_length = extraction_result.get("size")
+            logger.info(f"⏭️ Skipping HEAD for TikTok (tt_chain_token) — j2 size: {content_length}")
+        else:
+            try:
+                async with httpx.AsyncClient(timeout=5.0) as head_client:
+                    head_resp = await head_client.head(direct_url, headers={"User-Agent": EXACT_UA}, follow_redirects=True)
+                    if head_resp.status_code == 200:
+                        content_length = int(head_resp.headers.get("Content-Length", 0))
+            except:
+                logger.warning(f"⚠️ Failed to pre-fetch Content-Length for {stream_id}")
 
         stream_data = {
             "url": direct_url,
