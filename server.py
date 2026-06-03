@@ -792,7 +792,8 @@ async def download_video(data: DownloadRequest) -> DownloadResponse:
              raise HTTPException(status_code=401, detail="SESSION_EXPIRED")
 
         if not extraction_result:
-            raise HTTPException(status_code=400, detail="All extraction methods failed")
+            # Return 503 so the client knows this is a transient server-side failure
+            raise HTTPException(status_code=503, detail="Media extraction failed - please try again")
         
         logger.info(f"✅ Extraction successful. Platform: {platform}")
         logger.info(f"📦 Extraction result keys: {extraction_result.keys()}")
