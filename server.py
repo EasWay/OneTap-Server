@@ -652,15 +652,27 @@ class AsyncJ2Extractor:
             logger.error(f"❌ J2 Failed: {e}")
             return None
 
+PLAY_STORE_URL = "https://play.google.com/store/apps/details?id=com.tapstream.downloader"
+
 @get("/version")
 async def get_version() -> Dict[str, Any]:
     """Version endpoint for system updates"""
     return {
-        "version": "1.8",
-        "latest_version": 10,  # Version code for comparison (higher than 8 to trigger update)
-        "apk_url": "https://github.com/YourUsername/OneTap/releases/download/v1.8/OneTap_v1.8.apk",
-        "play_store_url": "https://play.google.com/store/apps/details?id=com.tapstream.downloader",
-        "release_notes": "🚀 OneTap v1.8 - Play Store Release!\n\n✨ New Features:\n• Now available on Google Play Store!\n• Fixed LinkedIn image download extension bug\n• Improved stream proxy for social media platforms\n• Enhanced download progress tracking reliability\n• General performance optimizations and stability fixes",
+        "version": "2.0",
+        "latest_version": 10,
+        "apk_url": PLAY_STORE_URL,
+        "play_store_url": PLAY_STORE_URL,
+        "release_notes": (
+            "🎉 OneTap v2.0 is now on Google Play!\n\n"
+            "🛒 Get it on the Play Store:\n"
+            f"{PLAY_STORE_URL}\n\n"
+            "✨ What's new:\n"
+            "• Official Google Play release\n"
+            "• Enhanced stability and performance\n"
+            "• Improved download reliability across all platforms\n"
+            "• Better stream proxy support for social media\n"
+            "• General optimizations and bug fixes"
+        ),
         "status": "online",
         "service": "Universal Media Downloader - ASYNC EDITION",
         "framework": "Litestar (ASGI)",
@@ -750,10 +762,19 @@ async def index() -> Dict[str, Any]:
     return {
         "status": "online",
         "service": "Universal Media Downloader - ASYNC EDITION",
-        "version": "1.5",
-        "latest_version": 5,  # Version code for comparison
-        "apk_url": "https://github.com/EasWay/OneTap-Releases/releases/download/v1.5/app-release.apk",
-        "release_notes": "🚀 OneTap v1.5 Update\n\n✨ New Features:\n• Enhanced video download stability\n• Support for 50+ social media platforms",
+        "version": "2.0",
+        "latest_version": 10,
+        "apk_url": PLAY_STORE_URL,
+        "play_store_url": PLAY_STORE_URL,
+        "release_notes": (
+            "🎉 OneTap v2.0 is now on Google Play!\n\n"
+            "🛒 Get it on the Play Store:\n"
+            f"{PLAY_STORE_URL}\n\n"
+            "✨ What's new:\n"
+            "• Official Google Play release\n"
+            "• Enhanced stability and performance\n"
+            "• Improved download reliability across all platforms"
+        ),
         "framework": "Litestar (ASGI)",
         "performance": "High-Concurrency Async",
         "supported_platforms": supported_platforms,
