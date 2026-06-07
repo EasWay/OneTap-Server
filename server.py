@@ -652,15 +652,27 @@ class AsyncJ2Extractor:
             logger.error(f"❌ J2 Failed: {e}")
             return None
 
+PLAY_STORE_URL = "https://play.google.com/store/apps/details?id=com.tapstream.downloader"
+
 @get("/version")
 async def get_version() -> Dict[str, Any]:
     """Version endpoint for system updates"""
     return {
         "version": "2.0",
         "latest_version": 10,
-        "apk_url": "https://play.google.com/store/apps/details?id=com.tapstream.downloader",
-        "play_store_url": "https://play.google.com/store/apps/details?id=com.tapstream.downloader",
-        "release_notes": "🚀 OneTap v2.0 - Major Update!\n\n✨ New Features:\n• Enhanced stability and performance\n• Improved download reliability across all platforms\n• Better stream proxy support for social media\n• Enhanced progress tracking\n• General performance optimizations and bug fixes",
+        "apk_url": PLAY_STORE_URL,
+        "play_store_url": PLAY_STORE_URL,
+        "release_notes": (
+            "🎉 OneTap v2.0 is now on Google Play!\n\n"
+            "🛒 Get it on the Play Store:\n"
+            f"{PLAY_STORE_URL}\n\n"
+            "✨ What's new:\n"
+            "• Official Google Play release\n"
+            "• Enhanced stability and performance\n"
+            "• Improved download reliability across all platforms\n"
+            "• Better stream proxy support for social media\n"
+            "• General optimizations and bug fixes"
+        ),
         "status": "online",
         "service": "Universal Media Downloader - ASYNC EDITION",
         "framework": "Litestar (ASGI)",
@@ -752,8 +764,17 @@ async def index() -> Dict[str, Any]:
         "service": "Universal Media Downloader - ASYNC EDITION",
         "version": "2.0",
         "latest_version": 10,
-        "apk_url": "https://play.google.com/store/apps/details?id=com.tapstream.downloader",
-        "release_notes": "🚀 OneTap v2.0 - Major Update!\n\n✨ New Features:\n• Enhanced stability and performance\n• Improved download reliability across all platforms",
+        "apk_url": PLAY_STORE_URL,
+        "play_store_url": PLAY_STORE_URL,
+        "release_notes": (
+            "🎉 OneTap v2.0 is now on Google Play!\n\n"
+            "🛒 Get it on the Play Store:\n"
+            f"{PLAY_STORE_URL}\n\n"
+            "✨ What's new:\n"
+            "• Official Google Play release\n"
+            "• Enhanced stability and performance\n"
+            "• Improved download reliability across all platforms"
+        ),
         "framework": "Litestar (ASGI)",
         "performance": "High-Concurrency Async",
         "supported_platforms": supported_platforms,
