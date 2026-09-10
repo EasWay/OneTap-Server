@@ -1,0 +1,11 @@
+.git
+.venv
+.trial-venv
+.runtime
+downloads
+__pycache__
+.env
+*.db
+*results.json
+*retest.json
+social_cookies.txt

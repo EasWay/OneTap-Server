@@ -13,6 +13,7 @@ from litestar.response import File, Stream
 from litestar.exceptions import HTTPException
 from pydantic import BaseModel, field_validator
 import httpx
+from provider_errors import ProviderOriginUnavailable, check_provider_origin
 
 # Configure logging
 logging.basicConfig(level=logging.INFO,
@@ -464,6 +465,7 @@ class AsyncJ2Extractor:
                 if not csrf_token:
                     logger.info("🤝 Performing J2Download handshake...")
                     home_resp = await client.get(J2_BASE_URL, headers=nav_headers)
+                    check_provider_origin(home_resp.status_code, home_resp.headers.get("cf-ray"))
                     
                     if home_resp.status_code != 200:
                         logger.warning(f"⚠️ Handshake returned status {home_resp.status_code}")
@@ -567,6 +569,7 @@ class AsyncJ2Extractor:
                 logger.info(f"📤 Payload: {payload}")
                 
                 response = await client.post(J2_API_URL, json=payload, headers=xhr_headers, cookies=cookies_to_use)
+                check_provider_origin(response.status_code, response.headers.get("cf-ray"))
                 
                 logger.info(f"📥 Response status: {response.status_code}")
                 
@@ -649,6 +652,8 @@ class AsyncJ2Extractor:
                     return None
                 
         except Exception as e:
+            if isinstance(e, ProviderOriginUnavailable):
+                raise
             logger.error(f"❌ J2 Failed: {e}")
             return None
 
@@ -677,13 +682,13 @@ async def get_version() -> Dict[str, Any]:
         "service": "Universal Media Downloader - ASYNC EDITION",
         "framework": "Litestar (ASGI)",
         "performance": "High-Concurrency Async",
-        "total_platforms": 50,
+        "total_platforms": 56,
         "features": [
             "Lightning-fast async processing with uvloop",
-            "Unified J2Download extraction for all platforms",
+            "Self-hosted Cobalt with yt-dlp fallback (coverage varies by provider)",
             "Smart URL processing that preserves essential parameters",
             "Stream proxy for reliable downloads",
-            "Handle thousands of concurrent downloads",
+            "Bounded extraction concurrency with provider fallback",
             "Download videos without watermarks (TikTok, etc.)",
             "Support for images, videos, and audio",
             "Multiple format support (.mp4, .mp3, .jpg, .png)",
@@ -781,7 +786,7 @@ async def index() -> Dict[str, Any]:
         "total_platforms": sum(len(platforms) for platforms in supported_platforms.values()),
         "features": [
             "Lightning-fast async processing",
-            "Handle thousands of concurrent downloads",
+            "Bounded extraction concurrency with provider fallback",
             "Download videos without watermarks (TikTok, etc.)",
             "Support for images, videos, and audio",
             "Multiple format support (.mp4, .mp3, .jpg, .png)",
@@ -790,8 +795,8 @@ async def index() -> Dict[str, Any]:
             "Free service with no registration required"
         ],
         "extraction_methods": {
-            "youtube": "RapidAPI Direct (Ultra-Fast)",
-            "social_media": "J2Download API (50+ sites)",
+            "youtube": "Self-hosted Cobalt / yt-dlp",
+            "social_media": "Self-hosted Cobalt / yt-dlp",
             "fallback": "Cross-platform compatibility",
             "architecture": "Optimized async stack with uvloop"
         },
@@ -804,218 +809,51 @@ async def index() -> Dict[str, Any]:
 
 @post("/download")
 async def download_video(data: DownloadRequest) -> DownloadResponse:
-    """
-    ASYNC High-Performance Download Endpoint with Stream Proxy
-    - Uses Pydantic for automatic validation
-    - HTTPX for non-blocking HTTP requests
-    - Implements stream proxy to avoid 403 errors
-    """
-    logger.info("🚀 Async download request received")
-    
+    """Use our own extractors; keep the existing Android response contract."""
+    from pathlib import Path
+    from extraction import extract, ExtractionUnavailable
+    url = data.url  # Preserve provider-required query parameters and signed links.
+    platform = detect_platform(url)
+    if platform == "generic":
+        raise HTTPException(status_code=400, detail="Unsupported media platform")
     try:
-        uid = str(uuid.uuid4())
-        
-        # 1. Clean & Expand URL (ASYNC)
-        url = await expand_short_url(data.url)
-        domain = urlparse(url).netloc.lower()
-        platform = detect_platform(url)
-        
-        logger.info(f"✅ Processing [{platform}]: {url}")
-        
-        # --- SIMPLIFIED EXTRACTION STRATEGY ---
-        # All platforms: J2Download (works for all social media + YouTube)
-        
-        extraction_result = None
-        
-        logger.info(f"🎯 {platform} detected - using J2Download")
-        j2 = AsyncJ2Extractor()
-        extraction_result = await j2.extract_download_url(
-            url, 
-            provided_token=data.csrf_token,
-            provided_cookies=data.cookie_string,
-            provided_ua=data.user_agent
-        )
-        
-        # Check for SESSION_EXPIRED special case
-        if isinstance(extraction_result, dict) and extraction_result.get("error") == "SESSION_EXPIRED":
-             raise HTTPException(status_code=401, detail="SESSION_EXPIRED")
-
-        if isinstance(extraction_result, dict) and extraction_result.get("error") == "CONTENT_NOT_FOUND":
-            raise HTTPException(status_code=404, detail="Content not found - the video may be private, deleted, or unavailable")
-
-        if not extraction_result:
-            # Return 503 so the client knows this is a transient server-side failure
-            raise HTTPException(status_code=503, detail="Media extraction failed - please try again")
-        
-        logger.info(f"✅ Extraction successful. Platform: {platform}")
-        logger.info(f"📦 Extraction result keys: {extraction_result.keys()}")
-        logger.info(f"🔗 Direct URL: {extraction_result.get('url', 'N/A')[:100]}...")
-        
-        # YouTube: Use stream proxy to avoid 403 errors from expired/IP-locked URLs
-        if platform == "youtube":
-            ext = extraction_result.get("ext", "mp4")
-            title = extraction_result.get("title", "video")
-            direct_url = extraction_result["url"]
-            
-            logger.info(f"🎬 YouTube detected - using stream proxy to avoid 403 errors")
-            logger.info(f"📱 Direct URL (first 150 chars): {direct_url[:150]}...")
-            
-            # Store stream data for proxying
-            stream_id = uid
-            
-            # Pre-fetch content length for YouTube as well
-            content_length = None
-            try:
-                async with httpx.AsyncClient(timeout=5.0) as head_client:
-                    head_resp = await head_client.head(direct_url, headers={"User-Agent": EXACT_UA}, follow_redirects=True)
-                    if head_resp.status_code == 200:
-                        content_length = int(head_resp.headers.get("Content-Length", 0))
-            except:
-                logger.warning(f"⚠️ Failed to pre-fetch Content-Length for YouTube {stream_id}")
-
-            stream_data = {
-                "url": direct_url,
-                "ext": ext,
-                "title": title,
-                "platform": platform,
-                "size": content_length,
-                "source": extraction_result.get("source", "j2")
-            }
-            
-            if not hasattr(app.state, 'streams'):
-                app.state.streams = {}
-            app.state.streams[stream_id] = stream_data
-            
-            logger.info(f"✅ YouTube: Stream proxy ready for {stream_id} (Size: {content_length})")
-            
-            return DownloadResponse(
-                status="success",
-                download_url=f"/stream/{stream_id}",  # Use stream proxy
-                filename=f"{title}.{ext}",
-                message="Stream proxy ready",
-                title=title,
-                platform=platform,
-                size=content_length
-            )
-        
-        # Check if it's a multi-image post (like TikTok photo slideshow)
-        if isinstance(extraction_result, dict) and "medias" in extraction_result:
-            medias = extraction_result["medias"]
-            images = [m for m in medias if m.get("type") == "image"]
-            
-            if len(images) > 1:
-                logger.info(f"📸 Multi-image post detected: {len(images)} images")
-                
-                # For multi-image, create stream URLs for each image
-                files = []
-                for i, image in enumerate(images):
-                    ext = image.get("extension", "jpg")
-                    image_stream_id = f"{uid}_image_{i+1}"
-                    
-                    # Store each image stream
-                    if not hasattr(app.state, 'streams'):
-                        app.state.streams = {}
-                    
-                    app.state.streams[image_stream_id] = {
-                        "url": image["url"],
-                        "ext": ext,
-                        "title": f"image_{i+1}",
-                        "platform": platform,
-                        "source": extraction_result.get("source", "j2")
-                    }
-                    
-                    files.append({
-                        "filename": f"image_{i+1}.{ext}",
-                        "download_url": f"/stream/{image_stream_id}",
-                        "type": "image"
-                    })
-                
-                return DownloadResponse(
-                    status="success",
-                    message=f"Ready to download {len(files)} images from photo slideshow",
-                    type="multi_image",
-                    total_images=len(files),
-                    files=files,
-                    title=extraction_result.get("title", "Photo Post"),
-                    platform=platform
-                )
-        
-        # For single video/audio files (non-YouTube, non-multi-image)
-        ext = extraction_result.get("ext", "mp4")
-        source = extraction_result.get("source", "j2")
-        title = extraction_result.get("title", "video")
-        direct_url = extraction_result["url"]
-        
-        # TikTok & Instagram images: Send direct URL (they're more stable than videos)
-        if platform in ["tiktok", "instagram"] and ext.lower() in ["jpg", "jpeg", "png", "webp"]:
-            logger.info(f"📸 {platform.capitalize()} image detected - sending direct URL")
-            logger.info(f"🔗 Direct URL: {direct_url}")
-            
-            return DownloadResponse(
-                status="success",
-                download_url=direct_url,  # Direct URL for images
-                filename=f"{title}.{ext}",
-                message="Direct download ready",
-                title=title,
-                platform=platform
-            )
-        
-        # All other platforms: Use stream proxy approach
-        # Store the direct URL and metadata for streaming
-        stream_id = uid
-        
-        # Pre-fetch content length if possible.
-        # TikTok's tt_chain_token is single-use: a HEAD request consumes the token,
-        # causing the subsequent GET in /stream to receive 404. Skip HEAD for these URLs.
-        content_length = None
-        if platform == "tiktok" or "tt_chain_token" in direct_url:
-            content_length = extraction_result.get("size")
-            logger.info(f"⏭️ Skipping HEAD for TikTok (tt_chain_token) — j2 size: {content_length}")
+        provider, items = await asyncio.wait_for(extract(url, Path(DOWNLOAD_DIR)), timeout=150)
+    except (ExtractionUnavailable, asyncio.TimeoutError) as error:
+        raise HTTPException(status_code=503, detail=str(error) or "Extraction timed out",
+                            extra={"code": "EXTRACTION_UNAVAILABLE"},
+                            headers={"Retry-After": "60"}) from error
+    if not hasattr(app.state, "streams"):
+        app.state.streams = {}
+    # Avoid accumulating expired Cobalt tunnel references indefinitely.
+    import time
+    now = time.time()
+    for key, value in list(app.state.streams.items()):
+        if now - value.get("created_at", now) > 3600:
+            del app.state.streams[key]
+    files = []
+    for item in items:
+        if item.get("local"):
+            download_url = "/files/" + item["local"]
         else:
-            try:
-                async with httpx.AsyncClient(timeout=5.0) as head_client:
-                    head_resp = await head_client.head(direct_url, headers={"User-Agent": EXACT_UA}, follow_redirects=True)
-                    if head_resp.status_code == 200:
-                        content_length = int(head_resp.headers.get("Content-Length", 0))
-            except:
-                logger.warning(f"⚠️ Failed to pre-fetch Content-Length for {stream_id}")
-
-        stream_data = {
-            "url": direct_url,
-            "ext": ext,
-            "title": title,
-            "platform": platform,
-            "source": source,
-            "size": content_length,
-            "original_url": url
-        }
-
-        # Store fallback URL for TikTok in case the primary CDN URL is unreachable
-        if "fallback_url" in extraction_result:
-            stream_data["fallback_url"] = extraction_result["fallback_url"]
-            logger.info(f"💾 Stored fallback URL for {platform}")
-        
-        if not hasattr(app.state, 'streams'):
-            app.state.streams = {}
-        app.state.streams[stream_id] = stream_data
-        
-        logger.info(f"✅ {platform}: Stream proxy ready for {stream_id} (Size: {content_length})")
-        
-        return DownloadResponse(
-            status="success",
-            download_url=f"/stream/{stream_id}",
-            filename=f"{title}.{ext}",
-            message="Stream proxy ready",
-            title=title,
-            platform=platform,
-            size=content_length
-        )
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"❌ Final Error: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+            stream_id = uuid.uuid4().hex
+            app.state.streams[stream_id] = {
+                "url": item["url"], "ext": item["ext"], "title": item["title"],
+                "platform": platform, "source": provider, "created_at": now,
+                "original_url": url,
+            }
+            download_url = "/stream/" + stream_id
+        files.append({"filename": item["filename"], "download_url": download_url,
+                      "type": item["type"]})
+    if len(files) == 1:
+        return DownloadResponse(status="success", download_url=files[0]["download_url"],
+                                filename=files[0]["filename"], type=items[0]["type"], title=items[0]["title"],
+                                platform=platform, size=items[0].get("size"),
+                                message=f"Ready via {provider}")
+    only_images = all(item["type"] == "image" for item in items)
+    return DownloadResponse(status="success", type="multi_image" if only_images else "multi_video",
+                            files=files, total_images=sum(item["type"] == "image" for item in items),
+                            title=items[0]["title"], platform=platform,
+                            message=f"Ready via {provider}")
 
 @get("/files/{filename:str}")
 async def serve_file(filename: str) -> File:
@@ -1064,7 +902,9 @@ async def stream_proxy(stream_id: str) -> Stream:
             "jpg": "image/jpeg",
             "jpeg": "image/jpeg",
             "png": "image/png",
-            "webm": "video/webm"
+            "webm": "video/webm", "m4a": "audio/mp4", "ogg": "audio/ogg",
+            "opus": "audio/ogg", "wav": "audio/wav", "flac": "audio/flac",
+            "aac": "audio/aac", "webp": "image/webp", "gif": "image/gif"
         }
         content_type = content_type_map.get(ext.lower(), "application/octet-stream")
         
@@ -1083,7 +923,7 @@ async def stream_proxy(stream_id: str) -> Stream:
         
         # Original J2 logic as fallback
         # Check URL expiry for TikTok before streaming
-        if platform == "tiktok" and "x-expires=" in current_url:
+        if stream_data.get("source") == "j2" and platform == "tiktok" and "x-expires=" in current_url:
             try:
                 parsed = urlparse(current_url)
                 params = parse_qs(parsed.query)
@@ -1103,7 +943,7 @@ async def stream_proxy(stream_id: str) -> Stream:
         # Build platform-specific request headers.
         # TikTok's CDN (especially api.tiktokv.com) checks the Referer header.
         stream_headers = {"User-Agent": EXACT_UA, "Accept": "*/*"}
-        if platform == "tiktok":
+        if stream_data.get("source") == "j2" and platform == "tiktok":
             stream_headers["Referer"] = "https://www.tiktok.com/"
 
         # 1. Start the GET request in streaming mode (DO NOT use a context manager here)
@@ -1143,13 +983,12 @@ async def stream_proxy(stream_id: str) -> Stream:
                 async for chunk in response.aiter_bytes(chunk_size=65536):
                     yield chunk
             except Exception as e:
-                logger.error(f"❌ Stream interrupted: {e}")
+                logger.error(f"❌ Stream interrupted: {type(e).__name__}")
+                raise
             finally:
                 # Crucial: Clean up HTTPX resources when the stream ends or client disconnects
                 await response.aclose()
                 await client.aclose()
-                if hasattr(app.state, 'streams') and stream_id in app.state.streams:
-                    del app.state.streams[stream_id]
                 logger.info(f"🧹 Cleaned up stream {stream_id}")
         
         # 4. Build headers and pass them to Litestar

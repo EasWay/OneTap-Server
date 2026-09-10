@@ -61,3 +61,8 @@ social_cookies.txt
 .pythonlibs/
 .local/
 replit_agent/
+
+.venv/
+.trial-venv/
+
+.runtime/

@@ -1,0 +1,27 @@
+services:
+  cobalt:
+    image: ghcr.io/imputnet/cobalt:11
+    init: true
+    read_only: true
+    restart: unless-stopped
+    environment:
+      API_URL: http://cobalt:9000/
+    # Private service: only the OneTap backend accesses this API and its tunnels.
+  backend:
+    build: .
+    init: true
+    environment:
+      PORT: '10000'
+      COBALT_API_URL: http://cobalt:9000/
+      EXTRACTION_PROVIDERS: cobalt,ytdlp,public_photos
+      INSTAGRAM_PROVIDERS: instagram,ytdlp,cobalt
+      YOUTUBE_PROVIDERS: ytdlp,cobalt
+      YOUTUBE_MAX_HEIGHT: "720"
+    ports:
+      - '127.0.0.1:10000:10000'
+    volumes:
+      - downloads:/app/downloads
+    depends_on:
+      - cobalt
+volumes:
+  downloads:
