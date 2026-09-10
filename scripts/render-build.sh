@@ -18,7 +18,10 @@ COBALT_COMMIT=a636575b09de1fc55d9b8cd98cac88f5f2f16b42
 # A prior build can be canceled mid-clone, leaving a partial, non-git directory
 # in the persisted build cache; a plain `git clone` into it then fails with
 # "already exists and is not an empty directory". Self-heal by removing it.
-if [ -d .runtime/cobalt ] && ! git -C .runtime/cobalt rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+# (Do not use `git rev-parse --is-inside-work-tree` here: run from inside
+# .runtime/cobalt without its own .git, git walks up to this repo's own
+# .git and reports true, masking a partial/missing checkout.)
+if [ -d .runtime/cobalt ] && [ ! -d .runtime/cobalt/.git ]; then
     rm -rf .runtime/cobalt
 fi
 if [ ! -d .runtime/cobalt/.git ]; then git clone --filter=blob:none https://github.com/imputnet/cobalt.git .runtime/cobalt; fi
