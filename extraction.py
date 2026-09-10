@@ -17,6 +17,13 @@ import httpx
 from source_domains import SUPPORTED_DOMAINS
 
 log = logging.getLogger(__name__)
+
+
+def safe_diagnostic(value: str) -> str:
+    """Keep failure reasons in server logs without copying URLs or credentials."""
+    value = re.sub(r"https?://\S+", "[URL]", value)
+    value = re.sub(r"(?i)(cookie|authorization|token|signature)\s*[:=]\s*\S+", r"\1=[REDACTED]", value)
+    return value[-2000:]
 _slots = asyncio.Semaphore(2)
 
 
@@ -138,7 +145,12 @@ async def cobalt(url: str, directory: Path) -> list[dict]:
             "filenameStyle": "pretty", "alwaysProxy": True,
         })
         if response.status_code != 200:
-            raise ExtractionUnavailable(f"Cobalt HTTP {response.status_code}")
+            try:
+                code = response.json().get("error", {}).get("code", "unknown")
+            except (ValueError, AttributeError):
+                code = "invalid_response"
+            code = re.sub(r"[^a-zA-Z0-9_.-]", "", str(code))[:120]
+            raise ExtractionUnavailable(f"Cobalt HTTP {response.status_code}: {code}")
         items = normalize_cobalt(response.json())
         source = urlparse(url)
         if ((source.hostname or "").endswith("instagram.com")
@@ -173,7 +185,7 @@ async def ytdlp(url: str, directory: Path) -> list[dict]:
         stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=90)
         if process.returncode:
             # Do not send extractor stderr (which can contain signed URLs) to clients.
-            log.warning("yt-dlp failed with exit code %s", process.returncode)
+            log.warning("yt-dlp failed with exit code %s: %s", process.returncode, safe_diagnostic(stderr.decode(errors="replace")))
             raise ExtractionUnavailable("yt-dlp could not retrieve this media")
         items = []
         for line in stdout.decode().splitlines():
@@ -319,5 +331,5 @@ async def extract(url: str, directory: Path) -> tuple[str, list[dict]]:
                 items = await providers[name](url, directory)
                 return name, items
             except (ExtractionUnavailable, httpx.HTTPError, ValueError, asyncio.TimeoutError) as error:
-                log.warning("Extraction provider %s failed (%s)", name, type(error).__name__)
+                log.warning("Extraction provider %s failed (%s): %s", name, type(error).__name__, safe_diagnostic(str(error)))
     raise ExtractionUnavailable("The configured extractors could not retrieve this media. Try again later or use another supported public link.")
