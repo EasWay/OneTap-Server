@@ -28,6 +28,21 @@ if [ ! -d .runtime/cobalt/.git ]; then git clone --filter=blob:none https://gith
 git -C .runtime/cobalt fetch origin "$COBALT_COMMIT"
 git -C .runtime/cobalt checkout --detach "$COBALT_COMMIT"
 (cd .runtime/cobalt; ../node/bin/node ../pnpm/node_modules/pnpm/bin/pnpm.cjs install --filter '@imput/cobalt-api...' --frozen-lockfile --prod)
+
+# YouTube's server-side bot check (HTTP 403 "Sign in to confirm you're not a
+# bot") blocks yt-dlp from datacenter IPs like Render's without a PO token.
+# bgutil-ytdlp-pot-provider mints tokens locally (no cookies, no browser, no
+# account) via a small Node server that the pip plugin (in requirements.txt)
+# queries over loopback at request time.
+POTPROVIDER_COMMIT=37169ee2656e08c5c2e5dc9df4c598c0cb4c88a8
+if [ -d .runtime/potprovider ] && [ ! -d .runtime/potprovider/.git ]; then
+    rm -rf .runtime/potprovider
+fi
+if [ ! -d .runtime/potprovider/.git ]; then git clone --filter=blob:none https://github.com/Brainicism/bgutil-ytdlp-pot-provider.git .runtime/potprovider; fi
+git -C .runtime/potprovider fetch origin "$POTPROVIDER_COMMIT"
+git -C .runtime/potprovider checkout --detach "$POTPROVIDER_COMMIT"
+(cd .runtime/potprovider/server; npm ci; npx tsc; npm prune --omit=dev)
+
 command -v ffmpeg
 command -v ffprobe
 node --version

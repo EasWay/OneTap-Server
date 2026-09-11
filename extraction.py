@@ -279,6 +279,12 @@ async def instagram(url: str, directory: Path) -> list[dict]:
         items = json.loads(stdout)
         if not isinstance(items, list) or not 1 <= len(items) <= 20:
             raise ExtractionUnavailable("Invalid Instagram collection")
+        if len(items) == 1 and items[0].get("type") == "video":
+            # Instaloader's post.video_url can resolve to a video-only rendition
+            # (observed consistently from Render's network, unlike yt-dlp's DASH
+            # video+audio selection). Let the provider chain fall through to
+            # yt-dlp for single-video posts, which reliably preserves audio.
+            raise ExtractionUnavailable("Preferring yt-dlp for single-video audio fidelity")
         for item in items:
             asset = urlparse(item.get("url") or "")
             host = asset.hostname or ""

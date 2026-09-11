@@ -20,6 +20,7 @@ def main():
         'API_URL': env['COBALT_API_URL'], 'API_PORT': '9000',
         'API_LISTEN_ADDRESS': '127.0.0.1', 'FFMPEG_BIN': shutil.which('ffmpeg', path=env['PATH']) or 'ffmpeg',
     }
+    potprovider_url = 'http://127.0.0.1:4416/ping'
     children = []
     stopping = False
 
@@ -27,23 +28,34 @@ def main():
         nonlocal stopping
         stopping = True
 
+    def await_ready(child, url, label, timeout_seconds):
+        deadline = time.monotonic() + timeout_seconds
+        while not stopping:
+            if child.poll() is not None:
+                raise RuntimeError(f'{label} exited before becoming ready')
+            try:
+                with urllib.request.urlopen(url, timeout=2) as response:
+                    if response.status == 200:
+                        return
+            except OSError:
+                pass
+            if time.monotonic() >= deadline:
+                raise RuntimeError(f'{label} readiness timed out')
+            time.sleep(.5)
+
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
     try:
         children.append(subprocess.Popen(['node', 'src/cobalt.js'], cwd=ROOT / '.runtime/cobalt/api', env=cobalt_env, start_new_session=True))
-        deadline = time.monotonic() + 60
-        while not stopping:
-            if children[0].poll() is not None:
-                raise RuntimeError('Cobalt exited before becoming ready')
-            try:
-                with urllib.request.urlopen(env['COBALT_API_URL'], timeout=2) as response:
-                    if response.status == 200:
-                        break
-            except OSError:
-                pass
-            if time.monotonic() >= deadline:
-                raise RuntimeError('Cobalt readiness timed out')
-            time.sleep(.5)
+        await_ready(children[0], env['COBALT_API_URL'], 'Cobalt', 60)
+        if stopping:
+            return 0
+        # Mints yt-dlp PO tokens locally so YouTube's bot check doesn't block
+        # extraction from Render's datacenter IP; no cookies or browser involved.
+        children.append(subprocess.Popen(
+            ['node', 'build/main.js', '-p', '4416', '-H', '127.0.0.1'],
+            cwd=ROOT / '.runtime/potprovider/server', env=env, start_new_session=True))
+        await_ready(children[-1], potprovider_url, 'PO token provider', 30)
         if stopping:
             return 0
         children.append(subprocess.Popen([sys.executable, 'server.py'], env=env, start_new_session=True))
