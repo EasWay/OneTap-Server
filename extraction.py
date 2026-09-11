@@ -171,7 +171,7 @@ async def ytdlp(url: str, directory: Path) -> list[dict]:
         raise ExtractionUnavailable("Invalid YouTube maximum height")
     selection = f"bv*[height<={height}]+ba/b[height<={height}]" if youtube else "bv*+ba/b"
     # Separate processes keep the event loop responsive and allow actual cancellation.
-    args = [sys.executable, "-m", "yt_dlp", "--ignore-config", "--no-progress",
+    args = [sys.executable, "-m", "yt_dlp", "--ignore-config", "--no-progress", "-v",
             "--no-playlist", "--playlist-end", "20", "--socket-timeout", "15",
             "--retries", "1", "--fragment-retries", "1", "--max-filesize", "250M",
             "--js-runtimes", "node", "-f", selection,
@@ -185,6 +185,7 @@ async def ytdlp(url: str, directory: Path) -> list[dict]:
     complete = False
     try:
         stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=90)
+        log.warning("yt-dlp diagnostic (exit %s): %s", process.returncode, safe_diagnostic(stderr.decode(errors="replace")))
         if process.returncode:
             # Do not send extractor stderr (which can contain signed URLs) to clients.
             log.warning("yt-dlp failed with exit code %s: %s", process.returncode, safe_diagnostic(stderr.decode(errors="replace")))
