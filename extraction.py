@@ -171,7 +171,7 @@ async def ytdlp(url: str, directory: Path) -> list[dict]:
         raise ExtractionUnavailable("Invalid YouTube maximum height")
     selection = f"bv*[height<={height}]+ba/b[height<={height}]" if youtube else "bv*+ba/b"
     # Separate processes keep the event loop responsive and allow actual cancellation.
-    args = [sys.executable, "-m", "yt_dlp", "--ignore-config", "--no-progress", "-v",
+    args = [sys.executable, "-m", "yt_dlp", "--ignore-config", "--no-progress",
             "--no-playlist", "--playlist-end", "20", "--socket-timeout", "15",
             "--retries", "1", "--fragment-retries", "1", "--max-filesize", "250M",
             "--js-runtimes", "node", "-f", selection,
