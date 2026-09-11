@@ -23,7 +23,9 @@ def safe_diagnostic(value: str) -> str:
     """Keep failure reasons in server logs without copying URLs or credentials."""
     value = re.sub(r"https?://\S+", "[URL]", value)
     value = re.sub(r"(?i)(cookie|authorization|token|signature)\s*[:=]\s*\S+", r"\1=[REDACTED]", value)
-    return value[-2000:]
+    if len(value) <= 4000:
+        return value
+    return value[:2000] + " …[truncated]… " + value[-2000:]
 _slots = asyncio.Semaphore(2)
 
 
@@ -169,7 +171,7 @@ async def ytdlp(url: str, directory: Path) -> list[dict]:
         raise ExtractionUnavailable("Invalid YouTube maximum height")
     selection = f"bv*[height<={height}]+ba/b[height<={height}]" if youtube else "bv*+ba/b"
     # Separate processes keep the event loop responsive and allow actual cancellation.
-    args = [sys.executable, "-m", "yt_dlp", "--ignore-config", "--no-progress",
+    args = [sys.executable, "-m", "yt_dlp", "--ignore-config", "--no-progress", "-v",
             "--no-playlist", "--playlist-end", "20", "--socket-timeout", "15",
             "--retries", "1", "--fragment-retries", "1", "--max-filesize", "250M",
             "--js-runtimes", "node", "-f", selection,
