@@ -275,8 +275,10 @@ async def instagram(url: str, directory: Path) -> list[dict]:
         sys.executable, str(Path(__file__).with_name("instagram_worker.py")), match[1],
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, start_new_session=True)
     try:
-        stdout, _ = await asyncio.wait_for(process.communicate(), timeout=30)
+        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=30)
         if process.returncode:
+            log.warning("Instaloader worker failed: %s",
+                        safe_diagnostic(stderr.decode(errors="replace").strip().splitlines()[-1] if stderr.strip() else "no stderr"))
             raise ExtractionUnavailable("Instaloader could not retrieve this public post")
         items = json.loads(stdout)
         if not isinstance(items, list) or not 1 <= len(items) <= 20:
