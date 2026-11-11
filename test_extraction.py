@@ -164,5 +164,24 @@ class InstagramWorkerTest(unittest.TestCase):
         rows=post_items(SimpleNamespace(caption=None,typename='GraphImage',is_video=False,url='photo'))
         self.assertEqual(rows[0]['url'],'photo')
         self.assertEqual(rows[0]['type'],'image')
+    def _page(self,media):
+        import json
+        data={'require':[{'xig_polaris_media':{'if_not_gated_logged_out':media}}]}
+        return '<html><script type="application/json" data-sjs>'+json.dumps(data)+'</script></html>'
+    def test_page_carousel_prefers_original_image_and_keeps_video(self):
+        from instagram_worker import items_from_page
+        base='https://scontent-x.cdninstagram.com/v/a.jpg?stp='
+        photo={'image_versions2':{'candidates':[{'url':base+'dst-jpg_e35_s640x640_tt6'},{'url':base+'dst-jpg_e35_tt6'}]}}
+        video={'image_versions2':{'candidates':[{'url':'thumb'}]},'video_versions':[{'url':'https://scontent-x.cdninstagram.com/v.mp4'}]}
+        media={'code':'ABCDE12345','caption':{'text':'hi'},'carousel_media':[photo,video]}
+        rows=items_from_page(self._page(media),'ABCDE12345')
+        self.assertEqual([r['type'] for r in rows],['image','video'])
+        self.assertEqual(rows[0]['url'],base+'dst-jpg_e35_tt6')
+        self.assertEqual(rows[0]['title'],'hi')
+    def test_page_without_media_or_other_shortcode_returns_none(self):
+        from instagram_worker import items_from_page
+        self.assertIsNone(items_from_page('<html>login</html>','ABCDE12345'))
+        media={'code':'OTHER','image_versions2':{'candidates':[{'url':'u'}]}}
+        self.assertIsNone(items_from_page(self._page(media),'ABCDE12345'))
 
 if __name__ == '__main__': unittest.main()
